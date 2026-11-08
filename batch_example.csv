@@ -1,0 +1,5 @@
+city,country,themes,distance_mi,width,height,format,tagline,markers,shape,border,mockup
+Phoenix,USA,noir;blueprint,7,12,16,png,THE VALLEY OF THE SUN,,rect,thin,black
+Tempe,USA,terracotta,2.5,8.3,11.7,pdf,,"33.4255, -111.9400, ASU, star",circle,none,
+Flagstaff,USA,forest,3,12,16,png,EST. 1882,,rect,double,oak
+Tucson,USA,all,5,3.6,7.8,png,,,rect,none,

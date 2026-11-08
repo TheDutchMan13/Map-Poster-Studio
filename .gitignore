@@ -1,0 +1,14 @@
+.venv/
+build/
+dist/
+__pycache__/
+cache/
+posters/
+fonts/
+data/
+settings.json
+
+# runtime copies made by the app
+themes/
+layers.json
+*.whl
