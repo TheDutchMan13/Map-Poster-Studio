@@ -205,15 +205,17 @@ before) or divide its number by 4.
 
 ## The window
 
-- **Theme gallery** with swatch tiles. Click to pick, double-click to edit, and type in *Search* (Ctrl+F) to filter.
-- **Recent posters** strip under the preview; click one to show it.
-- **Preview zoom:** Fit, −, +, 100%, mouse wheel to zoom, drag to move, double-click to open the file.
-- **Undo / Redo** (Ctrl+Z / Ctrl+Y) for every setting change.
-- **Live preview:** tick the box and a quick preview redraws a moment after you change something.
+Version 1.5 has a new "Studio" layout, dark by default (Ctrl+D or the sun/moon button switches to light).
+
+- **Left rail:** six sections (Place, Style, Details, Text, Overlays, Output). Click one or press Ctrl+1…6. At the bottom are dark/light mode, keyboard shortcuts and the posters folder.
+- **Inspector panel:** the settings for the chosen section. *Look* at the bottom saves and loads your saved looks.
+- **Toolbar:** the place and poster size at a glance, Undo / Redo (Ctrl+Z / Ctrl+Y), *Live* preview, *Quick preview* (Ctrl+P) and *Generate* (Ctrl+G). While a job runs, Generate turns into *Cancel* (Esc).
+- **Theme gallery** (Style): large swatch tiles in two columns. Click to pick, double-click to edit, type in the search box (Ctrl+F) to filter.
+- **Preview:** Fit, −, +, 100% and Open file float under the poster; mouse wheel zooms, drag moves, double-click opens the file.
+- **Bottom bar:** recent posters (click to show, double-click to open), progress and the *Log* button. The log opens by itself when something goes wrong.
 - **Colour picker** in the theme editor with a colour square, hue bar, hex and RGB entry. The sample poster updates while you drag.
 - **Tooltips** on every option; hover for a second.
-- **Keyboard shortcuts:** Ctrl+G generate, Ctrl+P quick preview, Esc cancel, Ctrl+S save a look, Ctrl+O posters folder, Ctrl+1…6 tabs, Ctrl+D dark mode, F1 list.
-- The window remembers its size, position and open tab.
+- The window remembers its size, position and open section.
 
 ## Customize
 

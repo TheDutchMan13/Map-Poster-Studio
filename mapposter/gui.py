@@ -15,7 +15,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
-from . import __version__, paths, themes
+from . import __version__, paths, studio, themes
 from .log import Cancelled, set_sink
 from .uikit import ColorPicker, PreviewCanvas, Tooltip
 from .units import M_PER_MI
@@ -72,7 +72,7 @@ DEFAULTS = {
     "scale_bar": False, "north_arrow": False, "grid": False, "elevation_profile": False,
     "photo": "", "photo_corner": "top-right", "qr": "", "qr_corner": "top-left",
     "font_file": "", "crop_marks": False, "icc": "", "set_places": "", "zoom_series": "",
-    "dark": False, "geometry": "", "tab": 0, "live_preview": False,
+    "dark": True, "geometry": "", "tab": 0, "live_preview": False, "ui": "",
 }
 
 TIPS = {
@@ -130,11 +130,10 @@ TIPS = {
     "zoom_series": "Several radii in miles, e.g. 1, 3, 10: one poster with all zoom levels side by side.",
 }
 BUTTON_TIPS = {
-    "Generate posters": "Make the posters for every selected theme (Ctrl+G).",
     "Quick preview": "A fast, low-resolution version to check the look (Ctrl+P).",
     "Batch from CSV…": "Make many posters from a spreadsheet file.",
-    "Cancel": "Stop after the current step (Esc).",
-    "Posters folder": "Open the folder with finished posters (Ctrl+O).",
+    "Log": "Show or hide the messages from the last run.",
+    "Hide log": "Show or hide the messages from the last run.",
     "Save as…": "Save these settings as a named look (Ctrl+S).",
     "Delete": "Delete the selected saved look.",
     "Pick on map…": "Click the place on a map instead of typing a name.",
@@ -147,9 +146,9 @@ BUTTON_TIPS = {
     "Shortcuts": "Show keyboard shortcuts (F1).",
 }
 SHORTCUTS = (
-    ("Ctrl+G", "Generate posters"), ("Ctrl+P", "Quick preview"), ("Esc", "Cancel the running job"),
+    ("Ctrl+G", "Generate"), ("Ctrl+P", "Quick preview"), ("Esc", "Cancel the running job"),
     ("Ctrl+S", "Save these settings as a look"), ("Ctrl+O", "Open the posters folder"),
-    ("Ctrl+Z / Ctrl+Y", "Undo / redo a change"), ("Ctrl+1 … 6", "Jump to a tab"),
+    ("Ctrl+Z / Ctrl+Y", "Undo / redo a change"), ("Ctrl+1 … 6", "Jump to a section on the left rail"),
     ("Ctrl+D", "Dark mode on / off"), ("Ctrl+F", "Search themes"), ("F1", "This list"),
     ("Mouse wheel", "Zoom the preview"), ("Drag", "Move the zoomed preview"),
     ("Double-click", "Open the poster file"),
@@ -179,7 +178,7 @@ class App(tk.Tk):
         paths.ensure_dirs()
         self.title(f"Map Poster Studio {__version__}")
         self.geometry("1340x820")
-        self.minsize(1040, 660)
+        self.minsize(1100, 680)
         try:
             ico = paths.RESOURCES.parent.parent / "assets" / "icon.ico"
             if sys.platform.startswith("win") and ico.exists():
@@ -204,6 +203,8 @@ class App(tk.Tk):
             except ValueError:
                 pass
             self.s.pop("distance_km")
+        if self.s.get("ui") != "studio":   # first start with the 1.5 window: dark by default
+            self.s["dark"] = True
 
         self._restore_geometry()
         self._t0 = 0.0
@@ -221,6 +222,12 @@ class App(tk.Tk):
         self.undo: list[dict] = []
         self.redo: list[dict] = []
         self.v: dict = {}
+        self.dark_var = tk.BooleanVar(value=bool(self.s.get("dark")))
+        self.live_var = tk.BooleanVar(value=bool(self.s.get("live_preview")))
+        self.section = 0
+        self._log_shown = False
+        self._recent_items: list = []
+        self.pal = studio.PALETTES["dark" if self.dark_var.get() else "light"]
         self._build()
         self._load_themes()
         self._apply_theme_mode()
@@ -228,15 +235,15 @@ class App(tk.Tk):
         self._bind_shortcuts()
         self._attach_tips()
         try:
-            self.nb.select(max(0, min(5, int(self.s.get("tab") or 0))))
-        except (tk.TclError, ValueError):
-            pass
+            self._show_section(int(self.s.get("tab") or 0))
+        except ValueError:
+            self._show_section(0)
+        self._update_title()
         self._push_snapshot()
         self._update_undo_buttons()
         self._ready = True
         set_sink(lambda m: self.q.put(("log", m)))
         self.after(100, self._poll)
-        self.after(300, self._place_divider)
         self.after(600, self._scan_recent)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -248,7 +255,7 @@ class App(tk.Tk):
             return
         w, h, x, y = map(int, m.groups())
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        if w >= 1040 and h >= 660 and -w + 120 < x < sw - 120 and 0 <= y < sh - 80:
+        if w >= 1100 and h >= 680 and -w + 120 < x < sw - 120 and 0 <= y < sh - 80:
             self.geometry(g)
 
     # ---------------------------------------------------------- helpers
@@ -259,140 +266,239 @@ class App(tk.Tk):
 
     @staticmethod
     def row(parent, r, label, widget, hint=None):
-        ttk.Label(parent, text=label).grid(row=r, column=0, sticky="w", pady=2, padx=(0, 6))
-        widget.grid(row=r, column=1, sticky="ew", pady=2)
+        ttk.Label(parent, text=label).grid(row=r, column=0, sticky="w", pady=3, padx=(0, 10))
+        widget.grid(row=r, column=1, sticky="ew", pady=3)
         if hint:
-            ttk.Label(parent, text=hint, foreground="gray").grid(row=r + 1, column=1, sticky="w")
+            ttk.Label(parent, text=hint, style="Muted.TLabel", wraplength=215, justify="left").grid(
+                row=r + 1, column=1, sticky="w", pady=(0, 2))
         return widget
 
     @staticmethod
     def frame(parent, text):
-        f = ttk.LabelFrame(parent, text=text, padding=6)
-        f.pack(fill="x", pady=(0, 6))
+        first = not parent.winfo_children()
+        ttk.Label(parent, text=text.upper(), style="Group.TLabel").pack(
+            anchor="w", pady=(2 if first else 18, 6))
+        f = ttk.Frame(parent)
+        f.pack(fill="x")
+        f.columnconfigure(0, minsize=112)
         f.columnconfigure(1, weight=1)
         return f
 
     # ------------------------------------------------------------ layout
+    SECTIONS = (
+        ("place", "Place", "Where the poster is, how much it covers and where the map data comes from."),
+        ("style", "Style", "Pick one or more themes, the map layers and the road widths."),
+        ("details", "Details", "Terrain, labels, a highlighted area and map extras."),
+        ("text", "Text", "Title, fonts, frame, photo and QR code."),
+        ("overlays", "Overlays", "Your own markers and GPX routes."),
+        ("output", "Output", "Size, file type, printing and poster sets."),
+    )
+    INSPECTOR_W = 388
+
     def _build(self) -> None:
-        root = ttk.Frame(self, padding=8)
-        root.pack(fill="both", expand=True)
-        root.columnconfigure(1, weight=1)
-        root.rowconfigure(0, weight=1)
+        pal = self.pal
+        self.columnconfigure(3, weight=1)
+        self.rowconfigure(0, weight=1)
 
-        left = ttk.Frame(root, width=460)
-        left.grid(row=0, column=0, sticky="ns", padx=(0, 8))
-        left.rowconfigure(1, weight=1)
+        # ---- left rail
+        rail = self.rail = tk.Frame(self, width=84, bg=pal["rail"])
+        rail.grid(row=0, column=0, sticky="ns")
+        rail.pack_propagate(False)
+        self.logo = tk.Canvas(rail, width=40, height=40, highlightthickness=0, borderwidth=0)
+        self.logo.pack(pady=(14, 14))
+        self.rail_btns: list = []
+        for i, (kind, label, _sub) in enumerate(self.SECTIONS):
+            b = studio.RailButton(rail, kind, label, lambda i=i: self._show_section(i), pal)
+            b.pack(pady=2)
+            Tooltip(b, f"{label} (Ctrl+{i + 1})")
+            self.rail_btns.append(b)
+        self.rail_spacer = tk.Frame(rail, bg=pal["rail"])
+        self.rail_spacer.pack(fill="both", expand=True)
+        self.mode_btn = studio.RailButton(rail, "moon", "", self._toggle_dark, pal, h=44)
+        self.keys_btn = studio.RailButton(rail, "keys", "", self._show_shortcuts, pal, h=44)
+        self.folder_btn = studio.RailButton(rail, "folder", "", lambda: open_path(self._out_dir()),
+                                            pal, h=44)
+        for b, tip in ((self.mode_btn, "Dark / light mode (Ctrl+D)"),
+                       (self.keys_btn, "Keyboard shortcuts (F1)"),
+                       (self.folder_btn, "Open the posters folder (Ctrl+O)")):
+            b.pack(pady=1)
+            Tooltip(b, tip)
+        self.rail_spacer2 = tk.Frame(rail, height=10, bg=pal["rail"])
+        self.rail_spacer2.pack()
 
-        pbox = ttk.Frame(left)
-        pbox.grid(row=0, column=0, sticky="ew", pady=(0, 6))
-        pb = ttk.Frame(pbox)
-        pb.pack(fill="x")
-        ttk.Label(pb, text="Preset").pack(side="left")
+        # ---- inspector
+        insp = ttk.Frame(self, width=self.INSPECTOR_W)
+        insp.grid(row=0, column=1, sticky="ns")
+        insp.pack_propagate(False)
+        head = ttk.Frame(insp, padding=(20, 18, 20, 4))
+        head.pack(fill="x")
+        self.sec_title = ttk.Label(head, text="", style="Title.TLabel")
+        self.sec_title.pack(anchor="w")
+        self.sec_sub = ttk.Label(head, text="", style="Sub.TLabel", wraplength=self.INSPECTOR_W - 44,
+                                 justify="left")
+        self.sec_sub.pack(anchor="w", pady=(3, 0))
+
+        looks = ttk.Frame(insp, padding=(20, 10, 20, 12))
+        looks.pack(fill="x", side="bottom")
+        ttk.Separator(insp).pack(fill="x", side="bottom")
+        ttk.Label(looks, text="Look").pack(side="left")
         self.preset_var = tk.StringVar()
-        self.preset_cb = ttk.Combobox(pb, textvariable=self.preset_var, width=16, state="readonly")
-        self.preset_cb.pack(side="left", padx=4)
+        self.preset_cb = ttk.Combobox(looks, textvariable=self.preset_var, width=6, state="readonly")
+        self.preset_cb.pack(side="left", padx=(8, 6), fill="x", expand=True)
         self.preset_cb.bind("<<ComboboxSelected>>", lambda e: self._load_preset())
-        ttk.Button(pb, text="Save as…", command=self._save_preset).pack(side="left")
-        ttk.Button(pb, text="Delete", command=self._delete_preset).pack(side="left", padx=2)
-        self.dark_var = tk.BooleanVar(value=bool(self.s.get("dark")))
-        ttk.Checkbutton(pb, text="Dark mode", variable=self.dark_var,
-                        command=self._apply_theme_mode).pack(side="right")
-        pb2 = ttk.Frame(pbox)
-        pb2.pack(fill="x", pady=(6, 0))
-        self.undo_btn = ttk.Button(pb2, text="Undo", width=7, command=self._undo)
-        self.undo_btn.pack(side="left")
-        self.redo_btn = ttk.Button(pb2, text="Redo", width=7, command=self._redo)
-        self.redo_btn.pack(side="left", padx=4)
-        self.live_var = tk.BooleanVar(value=bool(self.s.get("live_preview")))
-        live = ttk.Checkbutton(pb2, text="Live preview", variable=self.live_var,
-                               command=self._live_toggled)
-        live.pack(side="left", padx=(10, 0))
-        Tooltip(live, "Redraws a quick preview a moment after you change something. "
-                      "Works best with a local .pbf file or after the area is cached.")
-        ttk.Button(pb2, text="Shortcuts", command=self._show_shortcuts).pack(side="right")
+        Tooltip(self.preset_cb, "Saved looks: every setting except the place. Pick one to load it.")
+        ttk.Button(looks, text="Save as…", command=self._save_preset).pack(side="left")
+        ttk.Button(looks, text="Delete", command=self._delete_preset).pack(side="left", padx=(4, 0))
         self._refresh_presets()
 
-        nb = self.nb = ttk.Notebook(left)
-        nb.grid(row=1, column=0, sticky="nsew")
-        tabs = {}
-        for name in ("Place", "Map", "Details", "Text", "Overlays", "Output"):
-            f = ttk.Frame(nb, padding=8)
-            nb.add(f, text=name)
-            tabs[name] = f
+        self.scroll = studio.ScrollFrame(insp)
+        self.scroll.pack(fill="both", expand=True)
+        self.sections = []
+        for _ in self.SECTIONS:
+            f = ttk.Frame(self.scroll.inner, padding=(20, 8, 20, 22))
+            self.sections.append(f)
+        self._tab_place(self.sections[0])
+        self._tab_map(self.sections[1])
+        self._tab_details(self.sections[2])
+        self._tab_text(self.sections[3])
+        self._tab_overlays(self.sections[4])
+        self._tab_output(self.sections[5])
 
-        self._tab_place(tabs["Place"])
-        self._tab_map(tabs["Map"])
-        self._tab_details(tabs["Details"])
-        self._tab_text(tabs["Text"])
-        self._tab_overlays(tabs["Overlays"])
-        self._tab_output(tabs["Output"])
+        ttk.Separator(self, orient="vertical").grid(row=0, column=2, sticky="ns")
 
-        btn = ttk.Frame(left, padding=(0, 6, 0, 0))
-        btn.grid(row=2, column=0, sticky="ew")
-        for i in range(3):
-            btn.columnconfigure(i, weight=1)
-        self.go_btn = ttk.Button(btn, text="Generate posters", command=self._generate,
-                                 style="Accent.TButton")
-        self.go_btn.grid(row=0, column=0, columnspan=2, sticky="ew", ipady=6)
-        self.prev_btn = ttk.Button(btn, text="Quick preview", command=lambda: self._generate(True))
-        self.prev_btn.grid(row=0, column=2, sticky="ew", padx=(6, 0), ipady=6)
-        self.batch_btn = ttk.Button(btn, text="Batch from CSV…", command=self._batch)
-        self.batch_btn.grid(row=1, column=0, sticky="ew", pady=(6, 0))
-        self.cancel_btn = ttk.Button(btn, text="Cancel", command=self._cancel, state="disabled")
-        self.cancel_btn.grid(row=1, column=1, sticky="ew", padx=6, pady=(6, 0))
-        ttk.Button(btn, text="Posters folder", command=lambda: open_path(self._out_dir())).grid(
-            row=1, column=2, sticky="ew", pady=(6, 0))
+        # ---- main column
+        main = ttk.Frame(self)
+        main.grid(row=0, column=3, sticky="nsew")
+        tb = ttk.Frame(main, padding=(20, 12, 16, 12))
+        tb.pack(fill="x")
+        self.go_btn = ttk.Button(tb, text="Generate", style="Accent.TButton", width=11,
+                                 command=self._generate)
+        self.go_btn.pack(side="right", ipady=2)
+        self.go_tip = Tooltip(self.go_btn, "Make the posters for every selected theme (Ctrl+G).")
+        self.prev_btn = ttk.Button(tb, text="Quick preview", command=lambda: self._generate(True))
+        self.prev_btn.pack(side="right", padx=(0, 8), ipady=2)
+        live = ttk.Checkbutton(tb, text="Live", variable=self.live_var, command=self._live_toggled)
+        live.pack(side="right", padx=(0, 14))
+        Tooltip(live, "Live preview: redraws a quick preview a moment after you change something. "
+                      "Works best with a local .pbf file or after the area is cached.")
+        ttk.Separator(tb, orient="vertical").pack(side="right", fill="y", padx=(0, 14), pady=2)
+        self.redo_btn = ttk.Button(tb, text="Redo", width=6, command=self._redo)
+        self.redo_btn.pack(side="right", padx=(0, 14), ipady=2)
+        self.undo_btn = ttk.Button(tb, text="Undo", width=6, command=self._undo)
+        self.undo_btn.pack(side="right", padx=(0, 6), ipady=2)
+        self.title_lbl = ttk.Label(tb, text="", style="Head.TLabel")
+        self.title_lbl.pack(side="left")
+        self.meta_lbl = ttk.Label(tb, text="", style="Meta.TLabel")
+        self.meta_lbl.pack(side="left", padx=(12, 0))
+        ttk.Separator(main).pack(fill="x")
 
-        right = ttk.Frame(root)
-        right.grid(row=0, column=1, sticky="nsew")
-        right.columnconfigure(0, weight=1)
-        right.rowconfigure(0, weight=1)
-        self.pane = ttk.PanedWindow(right, orient="vertical")
-        self.pane.grid(row=0, column=0, sticky="nsew")
-        pv = ttk.LabelFrame(self.pane, text="Preview  ·  scroll to zoom, drag to move, double-click to open", padding=6)
-        pv.columnconfigure(0, weight=1)
-        pv.rowconfigure(0, weight=1)
-        self.preview = PreviewCanvas(pv, on_open=lambda: self.last_output and open_path(self.last_output))
-        self.preview.grid(row=0, column=0, sticky="nsew")
-        self.preview.set_text("Your poster shows up here\n\n"
-                              "Pick a place, then press Generate posters.\n"
+        bb = ttk.Frame(main, padding=(20, 10, 16, 10))
+        bb.pack(fill="x", side="bottom")
+        ttk.Separator(main).pack(fill="x", side="bottom")
+        ttk.Label(bb, text="Recent", style="Muted.TLabel").pack(side="left", padx=(0, 12))
+        self.recent_row = ttk.Frame(bb, height=88)
+        self.recent_row.pack(side="left", fill="y")
+        self.log_btn = ttk.Button(bb, text="Log", width=8, command=self._toggle_log)
+        self.log_btn.pack(side="right", padx=(14, 0))
+        pbx = ttk.Frame(bb, width=230, height=88)
+        pbx.pack(side="right", fill="y")
+        pbx.pack_propagate(False)
+        self.status = ttk.Label(pbx, text="Ready", anchor="e", style="Muted.TLabel")
+        self.status.pack(side="top", fill="x", pady=(30, 6))
+        self.progress = ttk.Progressbar(pbx, mode="indeterminate")
+
+        self.pane = ttk.PanedWindow(main, orient="vertical")
+        self.pane.pack(fill="both", expand=True)
+        stage = ttk.Frame(self.pane, style="Stage.TFrame")
+        self.preview = PreviewCanvas(stage, on_open=lambda: self.last_output and open_path(self.last_output))
+        self.preview.pack(fill="both", expand=True)
+        self.preview.set_text("Your poster shows up here\n"
+                              "Pick a place and a theme, then press Generate. "
                               "Quick preview makes a fast, low-resolution version first.")
-        rc = ttk.Frame(pv)
-        rc.grid(row=1, column=0, sticky="ew", pady=(8, 0))
-        ttk.Label(rc, text="Recent posters", font=("Segoe UI", 10, "bold")
-                  if sys.platform.startswith("win") else None).pack(anchor="w")
-        self.recent_row = ttk.Frame(rc)
-        self.recent_row.pack(anchor="w", fill="x", pady=(4, 0))
+        self.pane.add(stage, weight=1)
 
-        lg = ttk.LabelFrame(self.pane, text="Log", padding=6)
+        lg = self.log_frame = ttk.Frame(self.pane, padding=(14, 8, 8, 8))
         lg.columnconfigure(0, weight=1)
         lg.rowconfigure(0, weight=1)
-        self.log = tk.Text(lg, height=5, wrap="word", state="disabled", relief="flat",
-                           borderwidth=0, padx=6, pady=4,
+        self.log = tk.Text(lg, height=6, wrap="word", state="disabled", relief="flat",
+                           borderwidth=0, padx=8, pady=6,
                            font=("Consolas", 9) if sys.platform.startswith("win") else None)
         lsb = ttk.Scrollbar(lg, command=self.log.yview)
         self.log.configure(yscrollcommand=lsb.set)
         self.log.grid(row=0, column=0, sticky="nsew")
         lsb.grid(row=0, column=1, sticky="ns")
-        self.pane.add(pv, weight=6)
-        self.pane.add(lg, weight=1)
 
-        self.status = ttk.Label(self, text="Ready", anchor="w", padding=(12, 4))
-        self.status.pack(fill="x", side="bottom")
-        self.progress = ttk.Progressbar(self, mode="indeterminate")
+    def _show_section(self, i: int) -> None:
+        i = max(0, min(len(self.sections) - 1, i))
+        for f in self.sections:
+            f.pack_forget()
+        self.sections[i].pack(fill="x")
+        self.section = i
+        for j, b in enumerate(self.rail_btns):
+            b.set_active(j == i)
+        _kind, label, sub = self.SECTIONS[i]
+        self.sec_title.configure(text=label)
+        self.sec_sub.configure(text=sub)
+        self.scroll.to_top()
+
+    def _toggle_log(self, show: bool | None = None) -> None:
+        show = (not self._log_shown) if show is None else show
+        if show and not self._log_shown:
+            self.pane.add(self.log_frame, weight=0)
+            self.after(60, self._size_log)
+        elif not show and self._log_shown:
+            self.pane.forget(self.log_frame)
+        self._log_shown = show
+        self.log_btn.configure(text="Hide log" if show else "Log")
+
+    def _size_log(self) -> None:
+        try:
+            h = self.pane.winfo_height()
+            if h > 300:
+                self.pane.sashpos(0, h - 170)
+        except tk.TclError:
+            pass
+
+    def _update_title(self) -> None:
+        if not hasattr(self, "title_lbl"):
+            return
+
+        def g(k):
+            return str(self.v[k].get()).strip() if k in self.v else ""
+        city = g("display_city") or g("city") or "No place yet"
+        country = g("display_country") or g("country")
+        title = f"{city}, {country}" if country else city
+        self.title_lbl.configure(text=title if len(title) <= 34 else title[:33] + "…")
+        bits = []
+        try:
+            bits.append(f"{float(g('distance_mi')):g} mi")
+        except ValueError:
+            pass
+        try:
+            w, h = float(g("width")), float(g("height"))
+            bits.append(f"{w:g} × {h:g} in")
+            self.preview.set_aspect(w / h)
+        except (ValueError, ZeroDivisionError):
+            pass
+        n = len(self._selected_themes())
+        bits.append(f"{n} theme{'s' if n != 1 else ''}" if n else "no theme picked")
+        if g("source") == "pbf":
+            bits.append("local data")
+        self.meta_lbl.configure(text="  ·  ".join(bits))
 
     # ----- tab: place
     def _tab_place(self, t) -> None:
         loc = self.frame(t, "Location")
-        self.row(loc, 0, "City", ttk.Entry(loc, textvariable=self.var("city"), width=30))
+        self.row(loc, 0, "City", ttk.Entry(loc, textvariable=self.var("city"), width=20))
         self.row(loc, 1, "Country", ttk.Entry(loc, textvariable=self.var("country")))
         ll = ttk.Frame(loc)
-        ttk.Entry(ll, textvariable=self.var("lat"), width=11).pack(side="left", fill="x",
-                                                                    expand=True)
-        ttk.Entry(ll, textvariable=self.var("lon"), width=11).pack(side="left", fill="x",
-                                                                    expand=True, padx=3)
-        ttk.Button(ll, text="Pick on map…", command=self._map_picker).pack(side="left")
-        self.row(loc, 2, "Lat / Lon", ll, "optional – overrides the city lookup")
+        ttk.Entry(ll, textvariable=self.var("lat"), width=8).pack(side="left", fill="x",
+                                                                   expand=True)
+        ttk.Entry(ll, textvariable=self.var("lon"), width=8).pack(side="left", fill="x",
+                                                                   expand=True, padx=(4, 0))
+        self.row(loc, 2, "Lat / Lon", ll)
+        ttk.Button(loc, text="Pick on map…", command=self._map_picker).grid(
+            row=3, column=1, sticky="w", pady=(2, 0))
         self.row(loc, 4, "Display city", ttk.Entry(loc, textvariable=self.var("display_city")))
         self.row(loc, 5, "Display country",
                  ttk.Entry(loc, textvariable=self.var("display_country")))
@@ -402,7 +508,7 @@ class App(tk.Tk):
         af = ttk.Frame(area)
         ttk.Entry(af, textvariable=self.var("distance_mi"), width=7).pack(side="left")
         ttk.Label(af, text="miles").pack(side="left", padx=(2, 6))
-        preset = ttk.Combobox(af, values=list(AREA_PRESETS), state="readonly", width=22)
+        preset = ttk.Combobox(af, values=list(AREA_PRESETS), state="readonly", width=12)
         preset.set("presets…")
         preset.bind("<<ComboboxSelected>>",
                     lambda e: self.v["distance_mi"].set(str(AREA_PRESETS[preset.get()])))
@@ -413,59 +519,49 @@ class App(tk.Tk):
         src = self.var("source")
         sf = ttk.Frame(data)
         ttk.Radiobutton(sf, text="Online (OSM)", value="online", variable=src).pack(side="left")
-        ttk.Radiobutton(sf, text="Local .pbf file", value="pbf", variable=src).pack(
+        ttk.Radiobutton(sf, text="Local file", value="pbf", variable=src).pack(
             side="left", padx=6)
         self.row(data, 0, "Source", sf)
         pf = ttk.Frame(data)
-        ttk.Entry(pf, textvariable=self.var("pbf")).pack(side="left", fill="x", expand=True)
+        ttk.Entry(pf, textvariable=self.var("pbf"), width=8).pack(side="left", fill="x", expand=True)
         ttk.Button(pf, text="…", width=3, command=self._browse_pbf).pack(side="left", padx=2)
         self.row(data, 1, "PBF file", pf)
         df = ttk.Frame(data)
-        ttk.Entry(df, textvariable=self.var("region")).pack(side="left", fill="x", expand=True)
+        ttk.Entry(df, textvariable=self.var("region"), width=8).pack(side="left", fill="x", expand=True)
         ttk.Button(df, text="Download", command=self._download).pack(side="left", padx=2)
         self.row(data, 2, "Geofabrik", df, "e.g. north-america/us/arizona (≈300 MB)")
 
     # ----- tab: map
     def _tab_map(self, t) -> None:
         st = self.frame(t, "Themes")
+        st.columnconfigure(0, weight=1)
         # The listbox is only the selection model (not shown); the swatch gallery drives it.
         self.theme_list = tk.Listbox(st, selectmode="extended", exportselection=False)
-        sf = ttk.Frame(st)
-        sf.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 4))
-        ttk.Label(sf, text="Search").pack(side="left", padx=(0, 6))
         self.theme_filter = tk.StringVar()
-        self.search_entry = ttk.Entry(sf, textvariable=self.theme_filter)
-        self.search_entry.pack(side="left", fill="x", expand=True)
+        self.search_entry = ttk.Entry(st, textvariable=self.theme_filter)
+        self.search_entry.grid(row=0, column=0, columnspan=2, sticky="ew")
         Tooltip(self.search_entry, "Type part of a theme name to filter the swatches (Ctrl+F).")
-        ttk.Button(sf, text="✕", width=3, command=lambda: self.theme_filter.set("")).pack(
-            side="left", padx=(4, 0))
-        self.theme_count = ttk.Label(sf, text="", foreground="gray")
-        self.theme_count.pack(side="left", padx=(8, 0))
+        studio.Placeholder(self.search_entry, self.theme_filter, "Search themes   (Ctrl+F)")
         self.theme_filter.trace_add("write", lambda *a: self._rebuild_gallery())
-        gal = ttk.Frame(st)
-        gal.grid(row=1, column=0, columnspan=2, sticky="ew")
-        self.gal_canvas = tk.Canvas(gal, height=190, highlightthickness=0, borderwidth=0)
-        gsb = ttk.Scrollbar(gal, command=self.gal_canvas.yview)
-        self.gal_canvas.configure(yscrollcommand=gsb.set)
-        self.gal_canvas.pack(side="left", fill="both", expand=True)
-        gsb.pack(side="left", fill="y")
-        self.gal_inner = tk.Frame(self.gal_canvas, borderwidth=0)
-        self.gal_canvas.create_window((0, 0), window=self.gal_inner, anchor="nw")
-        self.gal_inner.bind("<Configure>", lambda e: self.gal_canvas.configure(
-            scrollregion=self.gal_canvas.bbox("all")))
-        self.gal_canvas.bind("<MouseWheel>", self._gal_wheel)
-        bf = ttk.Frame(st)
-        bf.grid(row=2, column=0, columnspan=2, sticky="ew", pady=4)
-        for text, cmd in (("All", self._select_all),
-                          ("None", lambda: (self.theme_list.selection_clear(0, "end"),
-                                            self._show_swatch())),
-                          ("Reload", self._load_themes), ("Edit / new…", self._edit_theme),
-                          ("Folder", lambda: open_path(paths.THEMES_DIR))):
-            ttk.Button(bf, text=text, command=cmd).pack(side="left", fill="x", expand=True)
-        self.swatch = tk.Canvas(st, width=260, height=24, highlightthickness=0)
-        self.swatch.grid(row=3, column=0, columnspan=2, sticky="w")
-        self.theme_desc = ttk.Label(st, text="", foreground="gray", wraplength=360)
+        cf = ttk.Frame(st)
+        cf.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 8))
+        self.theme_count = ttk.Label(cf, text="", style="Muted.TLabel")
+        self.theme_count.pack(side="left")
+        ttk.Button(cf, text="None", width=6, command=lambda: (
+            self.theme_list.selection_clear(0, "end"), self._show_swatch())).pack(side="right")
+        ttk.Button(cf, text="All", width=5, command=self._select_all).pack(side="right", padx=(0, 6))
+        self.gal_inner = ttk.Frame(st)
+        self.gal_inner.grid(row=2, column=0, columnspan=2, sticky="ew")
+        self.swatch = tk.Canvas(st, width=280, height=22, highlightthickness=0)
+        self.swatch.grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 4))
+        self.theme_desc = ttk.Label(st, text="", style="Muted.TLabel",
+                                    wraplength=self.INSPECTOR_W - 50, justify="left")
         self.theme_desc.grid(row=4, column=0, columnspan=2, sticky="w")
+        bf = ttk.Frame(st)
+        bf.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        for text, cmd in (("Edit / new…", self._edit_theme), ("Reload", self._load_themes),
+                          ("Folder", lambda: open_path(paths.THEMES_DIR))):
+            ttk.Button(bf, text=text, command=cmd).pack(side="left", padx=(0, 6))
 
         ly = self.frame(t, "Layers")
         all_layers = paths.load_layers()
@@ -492,7 +588,7 @@ class App(tk.Tk):
                                                   values=["rect", "circle", "heart", "boundary"]),
                  "boundary = the city's real outline")
         bf2 = ttk.Frame(rd)
-        ttk.Entry(bf2, textvariable=self.var("boundary_file")).pack(side="left", fill="x",
+        ttk.Entry(bf2, textvariable=self.var("boundary_file"), width=8).pack(side="left", fill="x",
                                                                     expand=True)
         ttk.Button(bf2, text="…", width=3, command=lambda: self._browse_into(
             "boundary_file", [("Shapes", "*.geojson *.json *.gpkg *.shp"), ("All", "*.*")])).pack(
@@ -508,27 +604,26 @@ class App(tk.Tk):
                  "shaded hills and/or contour lines")
         cf = ttk.Frame(tr)
         ttk.Entry(cf, textvariable=self.var("contour_interval"), width=6).pack(side="left")
-        ttk.Label(cf, text="ft  (blank = auto)    strength").pack(side="left")
-        ttk.Entry(cf, textvariable=self.var("terrain_strength"), width=5).pack(side="left",
-                                                                              padx=3)
-        self.row(tr, 2, "Contour every", cf)
+        ttk.Label(cf, text="ft").pack(side="left", padx=(6, 0))
+        self.row(tr, 2, "Contour every", cf, "blank = chosen automatically")
+        self.row(tr, 4, "Shading ×", ttk.Entry(tr, textvariable=self.var("terrain_strength"), width=6))
         ttk.Button(tr, text="Save terrain for offline use", command=self._prefetch_terrain).grid(
-            row=3, column=1, sticky="w", pady=(4, 0))
+            row=5, column=1, sticky="w", pady=(6, 0))
 
         lb = self.frame(t, "Labels")
         lf = ttk.Frame(lb)
         for key, text in (("label_roads", "Street names"), ("label_places", "Neighborhoods"),
                           ("label_parks", "Parks")):
             ttk.Checkbutton(lf, text=text, variable=self.var(key, tk.BooleanVar)).pack(
-                side="left", padx=(0, 6))
-        self.row(lb, 0, "Show", lf, "Neighborhoods also needs that layer on (Map tab)")
+                anchor="w", pady=1)
+        self.row(lb, 0, "Show", lf, "Neighborhoods also needs that layer on (Style)")
         self.row(lb, 2, "Size ×", ttk.Entry(lb, textvariable=self.var("label_scale"), width=6))
 
         hl = self.frame(t, "Highlight an area")
         self.row(hl, 0, "Place", ttk.Entry(hl, textvariable=self.var("highlight")),
                  "e.g. Encanto, Phoenix, AZ")
         hf = ttk.Frame(hl)
-        ttk.Entry(hf, textvariable=self.var("highlight_file")).pack(side="left", fill="x",
+        ttk.Entry(hf, textvariable=self.var("highlight_file"), width=8).pack(side="left", fill="x",
                                                                     expand=True)
         ttk.Button(hf, text="…", width=3, command=lambda: self._browse_into(
             "highlight_file", [("Shapes", "*.geojson *.json *.gpkg *.shp"), ("All", "*.*")])).pack(
@@ -538,7 +633,7 @@ class App(tk.Tk):
         ttk.Combobox(mf, textvariable=self.var("highlight_mode"), values=["fill", "focus"],
                      state="readonly", width=7).pack(side="left")
         ttk.Label(mf, text="  label").pack(side="left")
-        ttk.Entry(mf, textvariable=self.var("highlight_label")).pack(side="left", fill="x",
+        ttk.Entry(mf, textvariable=self.var("highlight_label"), width=8).pack(side="left", fill="x",
                                                                      expand=True, padx=3)
         self.row(hl, 3, "Style", mf, "focus = fade everything else")
 
@@ -547,7 +642,7 @@ class App(tk.Tk):
         for key, text in (("scale_bar", "Scale bar (miles)"), ("north_arrow", "North arrow"),
                           ("grid", "Lat/lon grid")):
             ttk.Checkbutton(ff, text=text, variable=self.var(key, tk.BooleanVar)).pack(
-                side="left", padx=(0, 6))
+                anchor="w", pady=1)
         self.row(fu, 0, "Show", ff)
 
     # ----- tab: text
@@ -557,7 +652,7 @@ class App(tk.Tk):
         for key, text in (("show_text", "Text"), ("show_coords", "Coordinates"),
                           ("show_gradient", "Fade")):
             ttk.Checkbutton(cf, text=text, variable=self.var(key, tk.BooleanVar)).pack(
-                side="left", padx=(0, 6))
+                anchor="w", pady=1)
         self.row(tx, 0, "Show", cf)
         self.row(tx, 1, "Position", ttk.Combobox(tx, textvariable=self.var("text_position"),
                                                  values=["bottom", "top"], state="readonly"))
@@ -573,7 +668,7 @@ class App(tk.Tk):
                  "e.g. Playfair Display, Noto Sans JP (blank = Roboto)")
 
         fo = ttk.Frame(tx)
-        ttk.Entry(fo, textvariable=self.var("font_file")).pack(side="left", fill="x", expand=True)
+        ttk.Entry(fo, textvariable=self.var("font_file"), width=8).pack(side="left", fill="x", expand=True)
         ttk.Button(fo, text="…", width=3, command=lambda: self._browse_into(
             "font_file", [("Fonts", "*.ttf *.otf"), ("All", "*.*")])).pack(side="left", padx=2)
         self.row(tx, 9, "Your font file", fo, "overrides the Google font")
@@ -585,7 +680,7 @@ class App(tk.Tk):
 
         ph = self.frame(t, "Photo & QR code")
         pf = ttk.Frame(ph)
-        ttk.Entry(pf, textvariable=self.var("photo")).pack(side="left", fill="x", expand=True)
+        ttk.Entry(pf, textvariable=self.var("photo"), width=8).pack(side="left", fill="x", expand=True)
         ttk.Button(pf, text="…", width=3, command=lambda: self._browse_into(
             "photo", [("Images", "*.jpg *.jpeg *.png *.webp *.heic"), ("All", "*.*")])).pack(
             side="left", padx=2)
@@ -602,8 +697,9 @@ class App(tk.Tk):
         mk = self.frame(t, "Markers")
         ttk.Label(mk, text="One per line:  lat, lon, label, icon\n"
                            "icon = pin, heart, star or dot (label and icon optional)",
-                  foreground="gray").grid(row=0, column=0, columnspan=2, sticky="w")
-        self.markers_txt = tk.Text(mk, height=6, width=40, wrap="none")
+                  style="Muted.TLabel", wraplength=330, justify="left").grid(
+            row=0, column=0, columnspan=2, sticky="w")
+        self.markers_txt = tk.Text(mk, height=6, width=30, wrap="none")
         self.markers_txt.grid(row=1, column=0, columnspan=2, sticky="ew", pady=3)
         self.markers_txt.insert("1.0", self.s.get("markers", ""))
         ttk.Button(mk, text="Add by clicking the map…", command=self._map_picker).grid(
@@ -644,8 +740,8 @@ class App(tk.Tk):
         ttk.Entry(wf, textvariable=self.var("width"), width=6).pack(side="left")
         ttk.Label(wf, text=" × ").pack(side="left")
         ttk.Entry(wf, textvariable=self.var("height"), width=6).pack(side="left")
-        ttk.Label(wf, text=" in (max 36)").pack(side="left")
-        self.row(size, 1, "Width × height", wf, "pixel presets assume 300 DPI")
+        ttk.Label(wf, text=" in").pack(side="left")
+        self.row(size, 1, "Width × height", wf, "up to 36 in; pixel presets assume 300 DPI")
         self.row(size, 3, "Print bleed", ttk.Entry(size, textvariable=self.var("bleed"), width=6),
                  "inches per side; 0.125 is standard for print shops")
 
@@ -661,7 +757,7 @@ class App(tk.Tk):
                                                     state="readonly"),
                  "framed-on-a-wall image next to each PNG")
         od = ttk.Frame(of)
-        ttk.Entry(od, textvariable=self.var("output_dir")).pack(side="left", fill="x",
+        ttk.Entry(od, textvariable=self.var("output_dir"), width=8).pack(side="left", fill="x",
                                                                 expand=True)
         ttk.Button(od, text="…", width=3, command=self._browse_outdir).pack(side="left", padx=2)
         self.row(of, 4, "Save to", od, "blank = the posters folder")
@@ -671,7 +767,7 @@ class App(tk.Tk):
                         variable=self.var("crop_marks", tk.BooleanVar)).grid(
             row=0, column=0, columnspan=2, sticky="w")
         icf = ttk.Frame(pr)
-        ttk.Entry(icf, textvariable=self.var("icc")).pack(side="left", fill="x", expand=True)
+        ttk.Entry(icf, textvariable=self.var("icc"), width=8).pack(side="left", fill="x", expand=True)
         ttk.Button(icf, text="…", width=3, command=lambda: self._browse_into(
             "icc", [("ICC profiles", "*.icc *.icm"), ("All", "*.*")])).pack(side="left", padx=2)
         self.row(pr, 1, "CMYK profile", icf, "adds a CMYK TIFF next to each PNG")
@@ -681,9 +777,16 @@ class App(tk.Tk):
                  "radii in miles, e.g. 1, 4, 12 (one place, side by side)")
         ttk.Label(st, text="Places side by side (one “City, Country” per line):").grid(
             row=2, column=0, columnspan=2, sticky="w", pady=(4, 0))
-        self.set_txt = tk.Text(st, height=3, width=40)
+        self.set_txt = tk.Text(st, height=3, width=30)
         self.set_txt.grid(row=3, column=0, columnspan=2, sticky="ew")
         self.set_txt.insert("1.0", self.s.get("set_places", ""))
+
+        ba = self.frame(t, "Many posters at once")
+        ttk.Label(ba, text="A spreadsheet (CSV) with one place per row. See batch_example.csv "
+                           "for the columns.", style="Muted.TLabel", wraplength=330,
+                  justify="left").grid(row=0, column=0, columnspan=2, sticky="w")
+        self.batch_btn = ttk.Button(ba, text="Batch from CSV…", command=self._batch)
+        self.batch_btn.grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
     # ------------------------------------------------------------ themes
     def _load_themes(self, select: str | None = None) -> None:
@@ -708,19 +811,15 @@ class App(tk.Tk):
     def _selected_themes(self) -> list[str]:
         return [self.theme_list.get(i) for i in self.theme_list.curselection()]
 
-    TILE_W, TILE_H = 144, 86
-
-    def _accent(self) -> str:
-        return "#60cdff" if self.dark_var.get() else "#005fb8"
-
-    def _gal_wheel(self, e) -> None:
-        self.gal_canvas.yview_scroll(int(-e.delta / 120), "units")
+    TILE_W, TILE_H = 160, 108
 
     def _rebuild_gallery(self) -> None:
         for w in self.gal_inner.winfo_children():
             w.destroy()
         self.tiles = {}
         W, H = self.TILE_W, self.TILE_H
+        MH = H - 28
+        bold = ("Segoe UI Semibold", 9) if sys.platform.startswith("win") else ("DejaVu Sans", 8, "bold")
         needle = self.theme_filter.get().strip().lower() if hasattr(self, "theme_filter") else ""
         shown = 0
         for n in range(self.theme_list.size()):
@@ -736,36 +835,49 @@ class App(tk.Tk):
             shown += 1
             c = tk.Canvas(self.gal_inner, width=W, height=H, highlightthickness=0,
                           borderwidth=0, cursor="hand2", bg=t["bg"])
-            c.grid(row=n // 3, column=n % 3, padx=4, pady=4)
-            c.create_rectangle(0, H * 0.56, W, H * 0.78, fill=t.get("water", t["bg"]), outline="")
-            c.create_rectangle(10, 9, 46, 28, fill=t.get("parks", t["bg"]), outline="")
-            for pts, k, wd in (((0, 22, W, 50), "road_motorway", 3), ((26, 0, 90, H), "road_primary", 2.4),
-                               ((0, 54, W, 30), "road_secondary", 1.8), ((58, 0, 108, H), "road_tertiary", 1.2),
-                               ((0, 38, W, 44), "road_residential", 1)):
+            c.grid(row=n // 2, column=n % 2, padx=(0, 8) if n % 2 == 0 else 0, pady=(0, 8))
+            c.create_polygon(0, MH * .62, W * .3, MH * .55, W * .6, MH * .68, W, MH * .58,
+                             W, MH * .82, 0, MH * .84, fill=t.get("water", t["bg"]), outline="",
+                             smooth=True)
+            c.create_rectangle(W * .08, MH * .12, W * .3, MH * .32, fill=t.get("parks", t["bg"]),
+                               outline="")
+            minor = t.get("road_residential", t["text"])
+            for i in range(1, 7):
+                c.create_line(0, MH * i / 7, W, MH * i / 7 + 6, fill=minor, width=1)
+                c.create_line(W * i / 7, 0, W * i / 7 - 8, MH, fill=minor, width=1)
+            for pts, k, wd in (((0, MH * .3, W, MH * .55), "road_motorway", 3.2),
+                               ((W * .25, 0, W * .55, MH), "road_primary", 2.4),
+                               ((0, MH * .75, W, MH * .45), "road_secondary", 1.8),
+                               ((W * .72, 0, W * .62, MH), "road_tertiary", 1.4)):
                 c.create_line(*pts, fill=t.get(k, t["text"]), width=wd)
-            c.create_rectangle(0, H - 20, W, H, fill=t["bg"], outline="")
-            c.create_text(W // 2, H - 10, text=key.replace("_", " "), fill=t["text"],
-                          font=("Segoe UI", 8, "bold") if sys.platform.startswith("win") else None)
+            c.create_rectangle(0, MH, W, H, fill=t["bg"], outline="")
+            name = str(t.get("name") or key.replace("_", " ").title())
+            c.create_text(10, MH + 14, text=name if len(name) <= 20 else name[:19] + "…",
+                          anchor="w", fill=t["text"], font=bold)
             c.bind("<Button-1>", lambda e, k=key: self._toggle_theme(k))
             c.bind("<Double-Button-1>", lambda e, k=key: self._edit_theme_key(k))
-            c.bind("<MouseWheel>", self._gal_wheel)
             Tooltip(c, f"{t.get('name', key)} - {t.get('description', '')}\n"
                        "Click to select or deselect. Double-click to edit.")
             self.tiles[key] = c
+        if not shown:
+            ttk.Label(self.gal_inner, text="No theme matches that search.",
+                      style="Muted.TLabel").grid(row=0, column=0, sticky="w", pady=6)
         self._mark_tiles()
 
     def _mark_tiles(self) -> None:
         sel = set(self._selected_themes())
         W, H = self.TILE_W, self.TILE_H
-        acc = self._accent()
+        acc = self.pal["accent_line"]
         for key, c in self.tiles.items():
             c.delete("sel")
             if key in sel:
-                c.create_rectangle(1, 1, W - 2, H - 2, outline=acc, width=3, tags="sel")
-                c.create_oval(W - 22, 6, W - 6, 22, fill=acc, outline="", tags="sel")
-                c.create_text(W - 14, 14, text="✓", fill="#ffffff" if not self.dark_var.get()
-                              else "#000000", font=("Segoe UI", 9, "bold")
-                              if sys.platform.startswith("win") else None, tags="sel")
+                c.create_rectangle(1.5, 1.5, W - 1.5, H - 1.5, outline=acc, width=3, tags="sel")
+                c.create_oval(W - 26, 7, W - 7, 26, fill=self.pal["accent"], outline="", tags="sel")
+                c.create_line(W - 21, 16.5, W - 17.5, 20, W - 11.5, 13, fill=self.pal["on_accent"],
+                              width=2, capstyle="round", joinstyle="round", tags="sel")
+            else:
+                c.create_rectangle(0.5, 0.5, W - 0.5, H - 0.5, outline=self.pal["line"], width=1,
+                                   tags="sel")
 
     def _toggle_theme(self, key: str) -> None:
         names = [self.theme_list.get(i) for i in range(self.theme_list.size())]
@@ -788,8 +900,11 @@ class App(tk.Tk):
     def _show_swatch(self) -> None:
         self._mark_tiles()
         total = self.theme_list.size()
+        nsel = len(self.theme_list.curselection())
         self.theme_count.configure(
-            text=f"{len(self.theme_list.curselection())} selected · {len(self.tiles)}/{total} shown")
+            text=f"{nsel} selected · {total} themes" if len(self.tiles) == total
+            else f"{nsel} selected · {len(self.tiles)} of {total} shown")
+        self._update_title()
         self._changed()
         self.swatch.delete("all")
         sel = self._selected_themes()
@@ -801,7 +916,8 @@ class App(tk.Tk):
         keys = ["bg", "water", "parks", "road_residential", "road_tertiary",
                 "road_secondary", "road_primary", "road_motorway", "text", "marker"]
         for i, k in enumerate(keys):
-            self.swatch.create_rectangle(i * 26, 2, i * 26 + 24, 22, fill=t[k], outline="#888")
+            self.swatch.create_rectangle(i * 27 + 1, 2, i * 27 + 25, 21, fill=t[k],
+                                         outline=self.pal["line"])
         n = len(sel)
         self.theme_desc.configure(
             text=f"{t.get('name', sel[-1])} – {t.get('description', '')}"
@@ -861,7 +977,8 @@ class App(tk.Tk):
         s["set_places"] = self.set_txt.get("1.0", "end").strip()
         s["dark"] = self.dark_var.get()
         s["geometry"] = self.geometry()
-        s["tab"] = self.nb.index("current")
+        s["tab"] = self.section
+        s["ui"] = "studio"
         s["live_preview"] = self.live_var.get()
         return s
 
@@ -875,15 +992,17 @@ class App(tk.Tk):
         if self.worker and self.worker.is_alive():
             return
         self.cancel_evt.clear()
-        for b in (self.go_btn, self.prev_btn, self.batch_btn):
+        for b in (self.prev_btn, self.batch_btn):
             b.configure(state="disabled")
-        self.cancel_btn.configure(state="normal")
+        self.go_btn.configure(text="Cancel", style="TButton", command=self._cancel)
+        self.go_tip.text = "Stop after the current step (Esc)."
         self.status.configure(text=label)
         self._t0 = time.time()
         self._run_label = label
         self._step = ""
         self.progress.configure(mode="indeterminate", value=0)
-        self.progress.pack(fill="x", side="bottom", before=self.status)
+        self.status.pack_configure(pady=(24, 8))
+        self.progress.pack(side="top", fill="x")
         self.progress.start(12)
         self.after(1000, self._tick)
 
@@ -977,10 +1096,10 @@ class App(tk.Tk):
     def _generate(self, preview: bool = False) -> None:
         s = self._collect()
         if not s["themes"]:
-            self._warn("No theme", "Select at least one theme (Map tab).")
+            self._warn("No theme", "Select at least one theme (Style).")
             return
         if not s["set_places"].strip() and (not s["city"].strip() or not s["country"].strip()):
-            self._warn("Missing", "City and country are required (Place tab).")
+            self._warn("Missing", "City and country are required (Place).")
             return
         job = self._build_job(s)
         if job is None:
@@ -991,7 +1110,7 @@ class App(tk.Tk):
                     "Large area",
                     "Downloading this much from the online OSM servers can take a long time "
                     "and may time out.\n\nFor big areas, a local .pbf extract is much faster "
-                    "(Place tab → Download).\n\nContinue online anyway?"):
+                    "(Place → Download).\n\nContinue online anyway?"):
                 return
         self._save_settings()
         from .core import run
@@ -1147,35 +1266,42 @@ class App(tk.Tk):
     # --------------------------------------------------------- dark mode
     def _apply_theme_mode(self) -> None:
         dark = self.dark_var.get()
-        try:
-            import sv_ttk
-            sv_ttk.set_theme("dark" if dark else "light")
-        except Exception:
-            style = ttk.Style(self)
-            style.theme_use("clam")
+        pal = self.pal = studio.use_theme(self, dark)
         self._polish_fonts()
-        bg = "#1c1c1c" if dark else "#fafafa"
-        fg = "#e6e6e6" if dark else "#1c1c1c"
+        field = "#232428" if dark else "#ffffff"
         for w in (self.log, self.markers_txt, self.set_txt, self.theme_list, self.gpx_list):
             try:
-                w.configure(bg=bg, fg=fg, insertbackground=fg,
-                            selectbackground="#2f6fbf" if dark else "#cfe1ff")
+                w.configure(bg=field, fg=pal["text"], insertbackground=pal["text"],
+                            selectbackground="#6b4d14" if dark else "#f3dfb4",
+                            selectforeground=pal["text"], highlightthickness=1,
+                            highlightbackground=pal["line"], highlightcolor=pal["accent_line"])
             except tk.TclError:
                 pass
-        self.preview.set_colors("#232323" if dark else "#ececec", fg)
-        pbg = ttk.Style(self).lookup("TFrame", "background") or bg
-        self.swatch.configure(bg=pbg)
-        self.gal_canvas.configure(bg=pbg)
-        self.gal_inner.configure(bg=pbg)
+        self.log.configure(highlightthickness=0)
+        for w in (self.rail, self.rail_spacer, self.rail_spacer2):
+            w.configure(bg=pal["rail"])
+        for b in self.rail_btns + [self.keys_btn, self.folder_btn]:
+            b.set_palette(pal)
+        self.mode_btn.set_palette(pal)
+        self.mode_btn.set_kind("sun" if dark else "moon")
+        self._draw_logo()
+        self.preview.set_colors(pal["stage"], pal["text"], pal["muted"], pal["placeholder"])
+        self.scroll.set_bg(pal["panel"])
+        studio.Placeholder.restyle(pal)
+        self.swatch.configure(bg=pal["panel"])
         self._mark_tiles()
+        if self._recent_items or self.recent_row.winfo_children():
+            self._show_recent(self._recent_items)
 
-    def _place_divider(self) -> None:
-        try:
-            h = self.pane.winfo_height()
-            if h > 200:
-                self.pane.sashpos(0, int(h * 0.84))
-        except tk.TclError:
-            pass
+    def _draw_logo(self) -> None:
+        c, pal = self.logo, self.pal
+        c.configure(bg=pal["rail"])
+        c.delete("all")
+        r, x0, y0, x1, y1 = 9, 2, 2, 38, 38
+        pts = [x0 + r, y0, x1 - r, y0, x1, y0, x1, y0 + r, x1, y1 - r, x1, y1,
+               x1 - r, y1, x0 + r, y1, x0, y1, x0, y1 - r, x0, y0 + r, x0, y0]
+        c.create_polygon(pts, smooth=True, fill=pal["accent"], outline="")
+        studio.draw_icon(c, "logo", 20, 20, pal["on_accent"])
 
     def _polish_fonts(self) -> None:
         """Slightly larger text and bold section titles; Windows only (Segoe UI)."""
@@ -1189,7 +1315,6 @@ class App(tk.Tk):
                 pass
         st = ttk.Style(self)
         st.configure("TLabelframe.Label", font=("Segoe UI", 10, "bold"))
-        st.configure("TNotebook.Tab", padding=(14, 6))
 
     # ----------------------------------------------------------- preview
     def _refresh_preview(self) -> None:
@@ -1205,6 +1330,9 @@ class App(tk.Tk):
     def _wire_changes(self) -> None:
         for v in list(self.v.values()) + list(self.layer_vars.values()):
             v.trace_add("write", lambda *a: self._changed())
+        for k in ("city", "country", "display_city", "display_country", "distance_mi",
+                  "width", "height", "source"):
+            self.v[k].trace_add("write", lambda *a: self._update_title())
         for t in (self.markers_txt, self.set_txt):
             t.bind("<KeyRelease>", lambda e: self._changed(), add="+")
 
@@ -1217,7 +1345,7 @@ class App(tk.Tk):
 
     def _snapshot(self) -> dict:
         snap = self._collect()
-        for k in ("geometry", "tab", "dark", "live_preview"):
+        for k in ("geometry", "tab", "dark", "live_preview", "ui"):
             snap.pop(k, None)
         return snap
 
@@ -1337,14 +1465,14 @@ class App(tk.Tk):
         key("<F1>", self._show_shortcuts)
         key("<Escape>", lambda: self._cancel() if self.worker and self.worker.is_alive() else None)
         for i in range(6):
-            key(f"<Control-Key-{i + 1}>", lambda i=i: self.nb.select(i))
+            key(f"<Control-Key-{i + 1}>", lambda i=i: self._show_section(i))
 
     def _toggle_dark(self) -> None:
         self.dark_var.set(not self.dark_var.get())
         self._apply_theme_mode()
 
     def _focus_search(self) -> None:
-        self.nb.select(1)
+        self._show_section(1)
         self.search_entry.focus_set()
         self.search_entry.selection_range(0, "end")
 
@@ -1397,10 +1525,10 @@ class App(tk.Tk):
                 tdir.mkdir(parents=True, exist_ok=True)
                 out = []
                 for p in files:
-                    tp = tdir / f"{p.stem}_{int(p.stat().st_mtime)}.png"
+                    tp = tdir / f"{p.stem}_{int(p.stat().st_mtime)}_s.png"
                     if not tp.exists():
                         with Image.open(p) as im:
-                            im.thumbnail((120, 160))
+                            im.thumbnail((60, 80))
                             im.convert("RGB").save(tp)
                     out.append((p, tp))
                 self.q.put(("recent", out))
@@ -1412,28 +1540,31 @@ class App(tk.Tk):
     def _show_recent(self, items) -> None:
         for w in self.recent_row.winfo_children():
             w.destroy()
+        self._recent_items = list(items)
         self.recent_imgs = []
+        pal = self.pal
         if not items:
             ttk.Label(self.recent_row, text="Posters you make will show up here.",
-                      foreground="gray").pack(anchor="w")
+                      style="Muted.TLabel").pack(side="left", pady=30)
             return
         from PIL import ImageTk, Image
-        for p, tp in items:
+        for p, tp in items[:7]:
             try:
                 with Image.open(tp) as im:
                     img = ImageTk.PhotoImage(im.copy())
             except Exception:
                 continue
             self.recent_imgs.append(img)
-            f = ttk.Frame(self.recent_row)
-            f.pack(side="left", padx=(0, 10))
-            lb = tk.Label(f, image=img, cursor="hand2", borderwidth=1, relief="solid")
-            lb.pack()
-            cap = p.stem if len(p.stem) <= 16 else p.stem[:15] + "…"
-            ttk.Label(f, text=cap, foreground="gray",
-                      font=("Segoe UI", 8) if sys.platform.startswith("win") else None).pack()
-            for w in (lb, f):
-                w.bind("<Button-1>", lambda e, q=p: self._open_recent(q))
+            lb = tk.Label(self.recent_row, image=img, cursor="hand2", borderwidth=0,
+                          bg=pal["panel"], highlightthickness=2, highlightbackground=pal["line"],
+                          highlightcolor=pal["accent_line"], takefocus=1)
+            lb.pack(side="left", padx=(0, 8))
+            lb.bind("<Button-1>", lambda e, q=p: self._open_recent(q))
+            lb.bind("<Return>", lambda e, q=p: self._open_recent(q))
+            lb.bind("<Double-Button-1>", lambda e, q=p: open_path(q))
+            lb.bind("<Enter>", lambda e, w=lb: w.configure(highlightbackground=self.pal["accent_line"]))
+            lb.bind("<Leave>", lambda e, w=lb: w.configure(highlightbackground=self.pal["line"]))
+            Tooltip(lb, f"{p.name}\nClick to show it here, double-click to open the file.")
 
     def _open_recent(self, p: Path) -> None:
         self.last_output = p
@@ -1444,7 +1575,7 @@ class App(tk.Tk):
         if self.worker and self.worker.is_alive():
             secs = int(time.time() - self._t0)
             step = f" · {self._step}" if self._step else ""
-            self.status.configure(text=f"{self._run_label}{step} · {secs // 60}:{secs % 60:02d} elapsed")
+            self.status.configure(text=f"{self._run_label}{step} · {secs // 60}:{secs % 60:02d}")
             self.after(1000, self._tick)
 
     def _append(self, text: str) -> None:
@@ -1462,9 +1593,11 @@ class App(tk.Tk):
     def _finish(self) -> None:
         self.progress.stop()
         self.progress.pack_forget()
-        for b in (self.go_btn, self.prev_btn, self.batch_btn):
+        self.status.pack_configure(pady=(30, 6))
+        for b in (self.prev_btn, self.batch_btn):
             b.configure(state="normal")
-        self.cancel_btn.configure(state="disabled")
+        self.go_btn.configure(text="Generate", style="Accent.TButton", command=self._generate)
+        self.go_tip.text = "Make the posters for every selected theme (Ctrl+G)."
 
     def _poll(self) -> None:
         try:
@@ -1495,7 +1628,8 @@ class App(tk.Tk):
                 elif kind == "error":
                     self._finish()
                     self._append(f"\n✗ Error: {val}")
-                    self.status.configure(text="Error – see log")
+                    self.status.configure(text="Error – see the log")
+                    self._toggle_log(True)
                     if not self._live_run:
                         messagebox.showerror("Error", val)
                     self._live_run = False

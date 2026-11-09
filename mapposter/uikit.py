@@ -252,10 +252,12 @@ class ColorPicker(tk.Toplevel):
 
 # ------------------------------------------------------------ poster preview
 class PreviewCanvas(ttk.Frame):
-    """Shows a poster image. Fit / zoom buttons, mouse-wheel zoom, drag to pan,
-    double-click to open the file."""
+    """Shows a poster image on a dark "stage". A floating bar has Fit / zoom /
+    open; mouse-wheel zooms, drag pans, double-click opens the file. With no
+    image it draws an outline of the poster shape with a hint inside."""
 
     MAX_SIDE = 6000   # very large posters are shrunk to this many pixels on a side
+    MARGIN = 36       # space around the poster when it is fitted
 
     def __init__(self, parent, on_open=None) -> None:
         super().__init__(parent)
@@ -267,20 +269,9 @@ class PreviewCanvas(ttk.Frame):
         self._cache_img = None
         self._text = ""
         self._fg = "#202020"
-
-        bar = ttk.Frame(self)
-        bar.pack(fill="x", pady=(0, 4))
-        for label, cmd, tip in (("Fit", self.fit, "Show the whole poster"),
-                                ("−", lambda: self._step(1 / 1.5), "Zoom out"),
-                                ("+", lambda: self._step(1.5), "Zoom in"),
-                                ("100%", lambda: self.set_zoom(1.0), "Actual pixels")):
-            b = ttk.Button(bar, text=label, width=5 if label != "100%" else 6, command=cmd)
-            b.pack(side="left", padx=(0, 4))
-            Tooltip(b, tip)
-        self.zoom_label = ttk.Label(bar, text="", foreground="gray")
-        self.zoom_label.pack(side="left", padx=6)
-        self.open_btn = ttk.Button(bar, text="Open file", command=self._open)
-        self.open_btn.pack(side="right")
+        self._muted = "#808080"
+        self._line = "#444444"
+        self.aspect = 0.75               # width / height of the empty-state outline
 
         self.canvas = tk.Canvas(self, highlightthickness=0, borderwidth=0)
         self.canvas.pack(fill="both", expand=True)
@@ -292,17 +283,46 @@ class PreviewCanvas(ttk.Frame):
         self.canvas.bind("<Button-4>", lambda e: self._step(1.25))
         self.canvas.bind("<Button-5>", lambda e: self._step(1 / 1.25))
 
+        bar = self.bar = ttk.Frame(self, padding=4)
+        for label, cmd, tip, wd in (("Fit", self.fit, "Show the whole poster", 4),
+                                    ("−", lambda: self._step(1 / 1.5), "Zoom out", 3),
+                                    ("+", lambda: self._step(1.5), "Zoom in", 3),
+                                    ("100%", lambda: self.set_zoom(1.0), "Actual pixels", 5)):
+            b = ttk.Button(bar, text=label, width=wd, command=cmd)
+            b.pack(side="left", padx=2)
+            Tooltip(b, tip)
+        self.zoom_label = ttk.Label(bar, text="", width=9, anchor="center", style="Muted.TLabel")
+        self.zoom_label.pack(side="left", padx=4)
+        self.open_btn = ttk.Button(bar, text="Open file", command=self._open)
+        self.open_btn.pack(side="left", padx=2)
+        Tooltip(self.open_btn, "Open the poster file (double-click the poster does the same)")
+        self._show_bar(False)
+
+    def _show_bar(self, on: bool) -> None:
+        if on:
+            self.bar.place(relx=0.5, rely=1.0, y=-14, anchor="s")
+        else:
+            self.bar.place_forget()
+
     # ---- public
-    def set_colors(self, bg: str, fg: str) -> None:
+    def set_colors(self, bg: str, fg: str, muted: str | None = None, line: str | None = None) -> None:
         self.canvas.configure(bg=bg)
         self._fg = fg
+        self._muted = muted or fg
+        self._line = line or fg
         self.redraw()
+
+    def set_aspect(self, aspect: float) -> None:
+        self.aspect = max(0.2, min(5.0, aspect))
+        if self.src is None:
+            self.redraw()
 
     def set_text(self, text: str) -> None:
         self.src = None
         self._text = text
         self._cache_key = None
         self.zoom_label.configure(text="")
+        self._show_bar(False)
         self.redraw()
 
     def set_image(self, path: Path) -> None:
@@ -316,6 +336,7 @@ class PreviewCanvas(ttk.Frame):
             self.src = im.copy()
         self.zoom = None
         self._cache_key = None
+        self._show_bar(True)
         self.redraw()
 
     def fit(self) -> None:
@@ -333,11 +354,15 @@ class PreviewCanvas(ttk.Frame):
         if self.on_open:
             self.on_open()
 
+    def _space(self) -> tuple[int, int]:
+        cw, ch = max(self.canvas.winfo_width(), 50), max(self.canvas.winfo_height(), 50)
+        return max(cw - 2 * self.MARGIN, 40), max(ch - 2 * self.MARGIN - 44, 40)
+
     def _fit_scale(self) -> float:
         if self.src is None:
             return 1.0
-        cw, ch = max(self.canvas.winfo_width(), 50), max(self.canvas.winfo_height(), 50)
-        return min(cw / self.src.width, ch / self.src.height, 1.0)
+        aw, ah = self._space()
+        return min(aw / self.src.width, ah / self.src.height, 1.0)
 
     def _scale(self) -> float:
         return self._fit_scale() if self.zoom is None else self.zoom
@@ -346,6 +371,34 @@ class PreviewCanvas(ttk.Frame):
         if self.src is None:
             return
         self.set_zoom(min(1.0, self._scale() * factor))
+
+    def _placeholder(self, cw: int, ch: int) -> None:
+        cv = self.canvas
+        aw, ah = self._space()
+        h = min(ah, aw / self.aspect, 560)
+        w = h * self.aspect
+        x0, y0 = (cw - w) / 2, (ch - 44 - h) / 2 + 8
+        cv.create_rectangle(x0, y0, x0 + w, y0 + h, outline=self._line, width=2, dash=(6, 5))
+        # a faint suggestion of streets and a title block
+        for i in range(1, 4):
+            y = y0 + h * 0.18 * i
+            cv.create_line(x0 + w * .12, y, x0 + w * .88, y + h * .04, fill=self._line, width=1)
+        for i in range(1, 4):
+            x = x0 + w * 0.25 * i
+            cv.create_line(x, y0 + h * .1, x - w * .05, y0 + h * .72, fill=self._line, width=1)
+        cv.create_line(x0 + w * .3, y0 + h * .84, x0 + w * .7, y0 + h * .84, fill=self._line, width=3)
+        cv.create_line(x0 + w * .4, y0 + h * .89, x0 + w * .6, y0 + h * .89, fill=self._line, width=1.5)
+        bg = cv.cget("bg")
+        cv.create_rectangle(x0 + w * .06, y0 + h * .33, x0 + w * .94, y0 + h * .55, fill=bg, outline="")
+        lines = self._text.split("\n", 1)
+        cv.create_text(cw / 2, y0 + h * .40, text=lines[0], fill=self._fg, justify="center",
+                       font=("Segoe UI Semibold", 13) if _WIN else ("DejaVu Sans", 12, "bold"),
+                       width=max(w - 30, 100))
+        if len(lines) > 1:
+            cv.create_text(cw / 2, y0 + h * .40 + 24, text=lines[1].strip(), fill=self._muted,
+                           justify="center", anchor="n",
+                           font=("Segoe UI", 10) if _WIN else ("DejaVu Sans", 9),
+                           width=max(w - 40, 100))
 
     def redraw(self, keep_center: bool = False) -> None:
         cv = self.canvas
@@ -358,8 +411,7 @@ class PreviewCanvas(ttk.Frame):
         cv.delete("all")
         if self.src is None:
             cv.configure(scrollregion=(0, 0, cw, ch))
-            cv.create_text(cw // 2, ch // 2, text=self._text, fill=self._fg, justify="center",
-                           font=("Segoe UI", 12) if _WIN else None, width=max(cw - 40, 100))
+            self._placeholder(cw, ch)
             return
         from PIL import Image, ImageTk
         s = self._scale()
@@ -369,11 +421,16 @@ class PreviewCanvas(ttk.Frame):
             self._cache_img = ImageTk.PhotoImage(self.src.resize(size, resample, reducing_gap=2.0)
                                                  if s < 1 else self.src.resize(size, resample))
             self._cache_key = size
-        rw, rh = max(size[0], cw), max(size[1], ch)
+        pad = 2 * self.MARGIN
+        rw, rh = max(size[0] + pad, cw), max(size[1] + pad + 44, ch)
         cv.configure(scrollregion=(0, 0, rw, rh))
-        cv.create_image(rw // 2, rh // 2, image=self._cache_img, anchor="center")
+        cx, cy = rw // 2, (rh - 44) // 2
+        hw, hh = size[0] / 2, size[1] / 2
+        cv.create_rectangle(cx - hw - 1, cy - hh - 1, cx + hw + 1, cy + hh + 1,
+                            outline=self._line, width=1)
+        cv.create_image(cx, cy, image=self._cache_img, anchor="center")
         if rw > cw:
             cv.xview_moveto(max(0.0, min(1.0, fx - (cw / rw) / 2)))
         if rh > ch:
             cv.yview_moveto(max(0.0, min(1.0, fy - (ch / rh) / 2)))
-        self.zoom_label.configure(text=("fit · " if self.zoom is None else "") + f"{s * 100:.0f}%")
+        self.zoom_label.configure(text=("Fit · " if self.zoom is None else "") + f"{s * 100:.0f}%")
