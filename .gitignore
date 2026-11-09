@@ -9,6 +9,10 @@ data/
 settings.json
 
 # runtime copies made by the app
-themes/
+/themes/
 layers.json
 *.whl
+
+# bundled fonts and default themes must be in the repo
+!mapposter/resources/fonts/
+!mapposter/resources/themes/
