@@ -31,7 +31,7 @@ EXCLUDED_HIGHWAYS = {
 M_PER_DEG = 111_320.0
 
 
-CACHE_VERSION = 3
+CACHE_VERSION = 4   # 4: place labels keep their place=* class
 
 
 @dataclass
@@ -40,12 +40,45 @@ class MapData:
     layers: dict         # name -> GeoDataFrame (polygons or lines, per layer kind)
     bbox: tuple          # (west, south, east, north) actually covered
 
+    def __getstate__(self):  # drawing caches never go into the disk cache
+        return {k: v for k, v in self.__dict__.items() if not k.startswith("_")}
+
     def layer(self, name):
         g = self.layers.get(name)
         return g if g is not None and len(g) else None
 
 
 # ----------------------------------------------------------------- geometry
+
+def _area(b) -> float:
+    return max(b[2] - b[0], 0) * max(b[3] - b[1], 0)
+
+
+def clip_to_bbox(data: MapData, bbox) -> MapData:
+    """Drop features entirely outside bbox (lon/lat). A cached 40 km area then serves
+    a 3 mile poster at 3 mile speed instead of drawing 40 km of hidden streets."""
+    import shapely
+
+    def sub(g):
+        if g is None or len(g) == 0:
+            return g
+        b = shapely.bounds(g.geometry.values)
+        keep = ((b[:, 0] <= bbox[2]) & (b[:, 2] >= bbox[0])
+                & (b[:, 1] <= bbox[3]) & (b[:, 3] >= bbox[1]))
+        return g if keep.all() else g[keep].reset_index(drop=True)
+
+    return MapData(sub(data.roads), {k: sub(v) for k, v in data.layers.items()}, tuple(bbox))
+
+
+def square_bbox(bbox):
+    """Smallest lon/lat box around bbox's center that is square on the ground, so a
+    portrait and a landscape poster of the same spot share one .pbf read."""
+    w, s, e, n = bbox
+    cx, cy = (w + e) / 2, (s + n) / 2
+    k = math.cos(math.radians(cy))
+    half = max((e - w) / 2 * k, (n - s) / 2)          # in latitude degrees
+    return (cx - half / k, cy - half, cx + half / k, cy + half)
+
 
 def view_half_extents(radius_m: float, width: float, height: float) -> tuple[float, float]:
     """Half width / half height in meters. radius = center to nearest edge."""
@@ -84,6 +117,29 @@ def tags_match(tags, spec: dict) -> bool:
 # -------------------------------------------------------------------- cache
 
 _INDEX = paths.CACHE_DIR / "mapdata_index.json"
+
+# The last results stay in memory, so repeated previews of the same area skip the
+# disk read and keep their prepared drawing paths (see render._prepared).
+_MEM: dict = {}
+_MEM_MAX = 2
+
+
+def _mem_get(key):
+    v = _MEM.pop(key, None)
+    if v is not None:
+        _MEM[key] = v            # most recently used last
+    return v
+
+
+def _mem_put(key, data) -> None:
+    _MEM.pop(key, None)
+    _MEM[key] = data
+    while len(_MEM) > _MEM_MAX:
+        _MEM.pop(next(iter(_MEM)))
+
+
+def clear_memory_cache() -> None:
+    _MEM.clear()
 
 
 def _layers_sig(layers: dict) -> str:
@@ -166,6 +222,7 @@ def _keep(gdf, kind):
     out = gpd.GeoDataFrame(geometry=gdf.geometry.values, crs=gdf.crs)
     out["name"] = gdf["name"].values if "name" in gdf.columns else None
     if kind == "point":  # areas tagged place=* -> their center
+        out["place"] = gdf["place"].values if "place" in gdf.columns else None
         out["geometry"] = out.geometry.representative_point()
         out = out[out["name"].notna()]
     return out.reset_index(drop=True)
@@ -243,6 +300,7 @@ def _read_pbf(pbf: Path, bbox, layers: dict, check_cancel) -> MapData:
     roads_wkb, roads_hw, roads_name = [], [], []
     feats = {name: [] for name in layers}
     names = {name: [] for name in layers}
+    kinds = {name: [] for name in point_layers}     # place=* value, for label ranking
 
     size_mb = pbf.stat().st_size / 1e6
     log(f"Reading {pbf.name} ({size_mb:,.0f} MB) — a big extract takes a few minutes...")
@@ -331,6 +389,7 @@ def _read_pbf(pbf: Path, bbox, layers: dict, check_cancel) -> MapData:
                         g = shapely.from_wkb(wkb.create_multipolygon(obj))
                         feats[name].append(shapely.to_wkb(g.representative_point()))
                         names[name].append(tags.get("name"))
+                        kinds[name].append(tags.get("place"))
                     except Exception:
                         pass
         elif obj.is_node() and point_layers:
@@ -340,12 +399,13 @@ def _read_pbf(pbf: Path, bbox, layers: dict, check_cancel) -> MapData:
                 if tags_match(tags, spec["tags"]):
                     feats[name].append(wkb.create_point(obj))
                     names[name].append(tags.get("name"))
+                    kinds[name].append(tags.get("place"))
 
     log(f"✓ Scanned {n:,} objects in {time.time() - t0:,.0f}s")
 
     box = shapely.box(west, south, east, north)
 
-    def to_gdf(wkbs, nm, hw=None):
+    def to_gdf(wkbs, nm, hw=None, place=None):
         import numpy as np
         if not wkbs:
             return _empty_gdf()
@@ -354,10 +414,12 @@ def _read_pbf(pbf: Path, bbox, layers: dict, check_cancel) -> MapData:
         data = {"geometry": geoms[keep], "name": np.asarray(nm, dtype=object)[keep]}
         if hw is not None:
             data["highway"] = np.asarray(hw, dtype=object)[keep]
+        if place is not None:
+            data["place"] = np.asarray(place, dtype=object)[keep]
         return gpd.GeoDataFrame(data, geometry="geometry", crs="EPSG:4326")
 
     roads = to_gdf(roads_wkb, roads_name, roads_hw)
-    out = {name: to_gdf(w, names[name]) for name, w in feats.items()}
+    out = {name: to_gdf(w, names[name], place=kinds.get(name)) for name, w in feats.items()}
     log(f"  {len(roads):,} streets in view; "
         + ", ".join(f"{len(g):,} {k}" for k, g in out.items()))
     return MapData(roads, out, tuple(bbox))
@@ -408,12 +470,23 @@ def get_map_data(lat: float, lon: float, radius_m: float, width: float, height: 
     else:
         source_id = "overpass"
 
+    mem_key = (source_id, sig, tuple(round(v, 6) for v in bbox))
     if use_cache:
+        hit = _mem_get(mem_key)
+        if hit is not None:
+            log("✓ Using map data already in memory")
+            return hit
         cached = _cache_lookup(source_id, sig, bbox)
         if cached is not None:
+            if _area(cached.bbox) > 1.1 * _area(bbox):
+                cached = clip_to_bbox(cached, bbox)
+            _mem_put(mem_key, cached)
             return cached
 
-    data = (_read_pbf(pbf, bbox, layers, check_cancel) if pbf
+    # Reading a .pbf costs the same whatever the box, so read a square: the cache
+    # then also serves the other orientation. Online stays exact (server load).
+    read_box = square_bbox(bbox) if pbf else bbox
+    data = (_read_pbf(pbf, read_box, layers, check_cancel) if pbf
             else _fetch_online(bbox, layers, check_cancel))
     if len(data.roads) == 0:
         if not allow_empty:
@@ -422,4 +495,8 @@ def get_map_data(lat: float, lon: float, radius_m: float, width: float, height: 
         log("⚠ No streets in this area – drawing terrain and other layers only")
     if use_cache:
         _cache_store(source_id, sig, data)
+    if read_box != bbox and _area(read_box) > 1.1 * _area(bbox):
+        data = clip_to_bbox(data, bbox)
+    if use_cache:
+        _mem_put(mem_key, data)
     return data

@@ -42,7 +42,8 @@ LAYERS_FILE = APP_DIR / "layers.json"
 BUNDLED_THEMES = RESOURCES / "themes"
 BUNDLED_FONTS = RESOURCES / "fonts"
 
-LAYERS_VERSION = 3
+LAYERS_VERSION = 4
+_OLD_PLACE_VALUES = ["suburb", "neighbourhood", "quarter", "town", "village", "hamlet"]
 
 # kind: "polygon" (filled), "line" (stroked), "point" (labels only) or
 # "coastline" (turned into ocean fill).
@@ -73,8 +74,8 @@ DEFAULT_LAYERS = {
     "buildings": {"kind": "polygon", "enabled": False,
                   "tags": {"building": True}},
     "places": {"kind": "point", "enabled": False,
-               "tags": {"place": ["suburb", "neighbourhood", "quarter", "town",
-                                  "village", "hamlet"]}},
+               "tags": {"place": ["city", "town", "suburb", "village", "quarter",
+                                  "neighbourhood", "hamlet"]}},
 }
 
 LAYER_ORDER = ["coastline", "water", "parks", "airports", "buildings", "waterways",
@@ -116,6 +117,9 @@ def load_layers() -> dict:
                     new[name]["tags"] = spec
             elif name == "waterways" and data.get("_version") == 2:
                 continue                    # streams moved to the new "washes" layer
+            elif (name == "places" and spec.get("tags", {}).get("place") == _OLD_PLACE_VALUES):
+                new[name]["enabled"] = spec.get("enabled", False)   # untouched old default:
+                continue                                           # take the new list (adds city)
             else:
                 new[name] = spec
         try:

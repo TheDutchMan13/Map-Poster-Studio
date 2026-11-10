@@ -101,6 +101,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help=argparse.SUPPRESS)
     g.add_argument("--no-auto-roads", action="store_true",
                    help="Fixed road widths instead of scaling them with the area")
+    g.add_argument("--classic", action="store_true",
+                   help="Draw exactly like the original maptoposter (no road-hierarchy, "
+                        "contrast or title tuning).")
 
     g = p.add_argument_group("layout")
     g.add_argument("--text-position", choices=["bottom", "top"], default="bottom")
@@ -280,7 +283,7 @@ def main(argv: list[str] | None = None) -> int:
             display_country=args.display_country, font_family=args.font_family,
             fmt=args.format, dpi=args.dpi,
             road_scale=args.road_scale_alias or args.road_scale,
-            auto_roads=not args.no_auto_roads,
+            auto_roads=not args.no_auto_roads, classic=args.classic,
             show_text=not args.no_text, show_coords=not args.no_coords,
             show_gradient=not args.no_gradient, pbf=args.pbf,
             output_dir=args.output_dir, use_cache=not args.no_cache,

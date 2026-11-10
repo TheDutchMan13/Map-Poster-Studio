@@ -18,7 +18,7 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 from . import __version__, paths, studio, themes
 from .log import Cancelled, set_sink
 from .uikit import ColorPicker, PreviewCanvas, Tooltip
-from .units import M_PER_MI
+from .units import parse_distance, M_PER_MI
 
 SETTINGS = paths.APP_DIR / "settings.json"
 
@@ -51,7 +51,7 @@ LAYER_LABELS = {
     "water": "Lakes & water", "parks": "Parks & green", "coastline": "Ocean (coastline)",
     "waterways": "Rivers & canals", "railways": "Railways", "airports": "Airports",
     "buildings": "Buildings", "washes": "Washes & streams", "trails": "Trails",
-    "places": "Neighborhoods (names)",
+    "places": "Place names (cities, suburbs)",
 }
 CORNERS = ["top-left", "top-right", "bottom-left", "bottom-right"]
 DEFAULTS = {
@@ -59,7 +59,7 @@ DEFAULTS = {
     "display_city": "", "display_country": "", "country_label": "",
     "distance_mi": "6", "source": "online", "pbf": "",
     "width": "12", "height": "16", "fmt": "png", "dpi": "300", "bleed": "0",
-    "font": "", "road_scale": "1.0", "auto_roads": True,
+    "font": "", "road_scale": "1.0", "auto_roads": True, "classic": False,
     "show_text": True, "show_coords": True, "show_gradient": True,
     "themes": ["terracotta"], "region": "north-america/us/arizona",
     "text_position": "bottom", "title_style": "spaced", "letter_spacing": "2",
@@ -83,7 +83,10 @@ TIPS = {
     "display_city": "Text printed as the title, if different from the city you looked up.",
     "display_country": "Text printed under the title, if different from the country.",
     "country_label": "Line printed under the city name, e.g. ARIZONA, USA.",
-    "distance_mi": "Miles from the centre to the nearest poster edge. Bigger = more of the region.",
+    "distance_mi": "Distance from the centre to the nearest poster edge, in miles. "
+                   "You can also type a unit: 40 km, 5000 m, 800 ft.",
+    "classic": "Draw exactly like the original maptoposter: same road widths and fade, "
+               "no contrast or road-hierarchy tuning.",
     "source": "Online downloads data from OpenStreetMap. A local .pbf file is faster for big areas.",
     "pbf": "A downloaded OpenStreetMap extract (.pbf). Used when Source is Local .pbf file.",
     "region": "Geofabrik region path to download, e.g. north-america/us/arizona.",
@@ -386,10 +389,12 @@ class App(tk.Tk):
         self.redo_btn.pack(side="right", padx=(0, 14), ipady=2)
         self.undo_btn = ttk.Button(tb, text="Undo", width=6, command=self._undo)
         self.undo_btn.pack(side="right", padx=(0, 6), ipady=2)
-        self.title_lbl = ttk.Label(tb, text="", style="Head.TLabel")
-        self.title_lbl.pack(side="left")
-        self.meta_lbl = ttk.Label(tb, text="", style="Meta.TLabel")
-        self.meta_lbl.pack(side="left", padx=(12, 0))
+        tstack = ttk.Frame(tb)
+        tstack.pack(side="left", fill="x", expand=True)
+        self.title_lbl = ttk.Label(tstack, text="", style="Head.TLabel")
+        self.title_lbl.pack(side="top", anchor="w")
+        self.meta_lbl = ttk.Label(tstack, text="", style="Meta.TLabel")
+        self.meta_lbl.pack(side="top", anchor="w")
         ttk.Separator(main).pack(fill="x")
 
         bb = ttk.Frame(main, padding=(20, 10, 16, 10))
@@ -471,7 +476,9 @@ class App(tk.Tk):
         self.title_lbl.configure(text=title if len(title) <= 34 else title[:33] + "…")
         bits = []
         try:
-            bits.append(f"{float(g('distance_mi')):g} mi")
+            from .units import fmt_miles
+            m = parse_distance(g("distance_mi"), bare="mi")
+            bits.append(fmt_miles(m) + (f" ({m / 1000:g} km)" if "km" in g("distance_mi") else ""))
         except ValueError:
             pass
         try:
@@ -483,7 +490,7 @@ class App(tk.Tk):
         n = len(self._selected_themes())
         bits.append(f"{n} theme{'s' if n != 1 else ''}" if n else "no theme picked")
         if g("source") == "pbf":
-            bits.append("local data")
+            bits.append("offline")
         self.meta_lbl.configure(text="  ·  ".join(bits))
 
     # ----- tab: place
@@ -507,13 +514,13 @@ class App(tk.Tk):
         area = self.frame(t, "Area")
         af = ttk.Frame(area)
         ttk.Entry(af, textvariable=self.var("distance_mi"), width=7).pack(side="left")
-        ttk.Label(af, text="miles").pack(side="left", padx=(2, 6))
+        ttk.Label(af, text="mi").pack(side="left", padx=(2, 6))
         preset = ttk.Combobox(af, values=list(AREA_PRESETS), state="readonly", width=12)
         preset.set("presets…")
         preset.bind("<<ComboboxSelected>>",
                     lambda e: self.v["distance_mi"].set(str(AREA_PRESETS[preset.get()])))
         preset.pack(side="left", fill="x", expand=True)
-        self.row(area, 0, "Radius", af, "center → nearest poster edge")
+        self.row(area, 0, "Radius", af, "center → nearest edge · miles, or type 40 km")
 
         data = self.frame(t, "Map data")
         src = self.var("source")
@@ -584,6 +591,9 @@ class App(tk.Tk):
         ttk.Checkbutton(rf, text="auto-scale with area", variable=self.var(
             "auto_roads", tk.BooleanVar)).pack(side="left", padx=8)
         self.row(rd, 0, "Road width ×", rf)
+        ttk.Checkbutton(rd, text="Classic look (exactly like the original)",
+                        variable=self.var("classic", tk.BooleanVar)).grid(
+            row=20, column=1, sticky="w", pady=(2, 0))
         self.row(rd, 1, "Map shape", ttk.Combobox(rd, textvariable=self.var("shape"), state="readonly",
                                                   values=["rect", "circle", "heart", "boundary"]),
                  "boundary = the city's real outline")
@@ -1000,6 +1010,7 @@ class App(tk.Tk):
         self._t0 = time.time()
         self._run_label = label
         self._step = ""
+        self._count = ""
         self.progress.configure(mode="indeterminate", value=0)
         self.status.pack_configure(pady=(24, 8))
         self.progress.pack(side="top", fill="x")
@@ -1026,7 +1037,7 @@ class App(tk.Tk):
     def _build_job(self, s: dict, need_city=True):
         from .core import Job
         try:
-            dist = float(s["distance_mi"]) * M_PER_MI
+            dist = parse_distance(s["distance_mi"], bare="mi")
             w, h = float(s["width"]), float(s["height"])
             dpi = int(float(s["dpi"]))
             road_scale = float(s["road_scale"] or 1)
@@ -1034,7 +1045,6 @@ class App(tk.Tk):
             contour = float(s["contour_interval"]) if s["contour_interval"].strip() else None
             t_strength = float(s["terrain_strength"] or 1)
             l_scale = float(s["label_scale"] or 1)
-            from .units import parse_distance
             zooms = [parse_distance(x) for x in s["zoom_series"].replace(";", ",").split(",")
                      if x.strip()]
             spacing = int(float(s["letter_spacing"] or 0))
@@ -1056,7 +1066,7 @@ class App(tk.Tk):
             display_city=s["display_city"].strip() or None,
             display_country=s["display_country"].strip() or None,
             font_family=s["font"].strip() or None, fmt=s["fmt"], dpi=dpi,
-            road_scale=road_scale, auto_roads=s["auto_roads"],
+            road_scale=road_scale, auto_roads=s["auto_roads"], classic=bool(s.get("classic")),
             show_text=s["show_text"], show_coords=s["show_coords"],
             show_gradient=s["show_gradient"], pbf=pbf,
             output_dir=s["output_dir"].strip() or None,
@@ -1105,6 +1115,7 @@ class App(tk.Tk):
         if job is None:
             return
         job.preview = preview
+        self._job_info = (preview, job.width, job.height, job.dpi, job.fmt)
         if job.distance_m > 20000 and not job.pbf and not job.fit_route:
             if not self._ask(
                     "Large area",
@@ -1163,7 +1174,8 @@ class App(tk.Tk):
     # ----------------------------------------------------------- presets
     PRESET_TO_VAR = {
         "fmt": "fmt", "dpi": "dpi", "width": "width", "height": "height", "bleed": "bleed",
-        "road_scale": "road_scale", "auto_roads": "auto_roads", "show_text": "show_text",
+        "road_scale": "road_scale", "auto_roads": "auto_roads", "classic": "classic",
+        "show_text": "show_text",
         "show_coords": "show_coords", "show_gradient": "show_gradient",
         "text_position": "text_position", "title_style": "title_style",
         "letter_spacing": "letter_spacing", "tagline": "tagline", "border": "border",
@@ -1317,12 +1329,24 @@ class App(tk.Tk):
         st.configure("TLabelframe.Label", font=("Segoe UI", 10, "bold"))
 
     # ----------------------------------------------------------- preview
-    def _refresh_preview(self) -> None:
+    def _badge_for(self, p: Path) -> str:
+        info = getattr(self, "_job_info", None)
+        if p.parent.name == "preview" and info:
+            _, w, h, dpi, fmt = info
+            from .core import preview_dpi
+            return (f"PREVIEW · {preview_dpi(w, h)} dpi  —  final: {w:g} × {h:g} in, "
+                    + (f"{dpi} dpi {fmt.upper()}" if fmt == "png" else fmt.upper()))
+        if info:
+            _, w, h, dpi, fmt = info
+            return f"{w:g} × {h:g} in · {dpi} dpi"
+        return ""
+
+    def _refresh_preview(self, badge: str = "") -> None:
         p = self.last_output
         if not p or p.suffix.lower() != ".png" or not p.exists():
             return
         try:
-            self.preview.set_image(p)
+            self.preview.set_image(p, badge)
         except Exception as e:  # preview is a nicety, never fatal
             self.preview.set_text(f"(preview unavailable: {e})")
 
@@ -1578,13 +1602,24 @@ class App(tk.Tk):
             self.status.configure(text=f"{self._run_label}{step} · {secs // 60}:{secs % 60:02d}")
             self.after(1000, self._tick)
 
+    STAGES = (("Reading ", "reading map data"), ("Downloading", "downloading"),
+              ("Using cached", "map data ready"), ("already in memory", "map data ready"),
+              ("Rendering", "drawing"), ("Saving", "saving"), ("Saved", "saved"))
+
     def _append(self, text: str) -> None:
         m = re.match(r"\s*(?:=+ )?\[(\d+)/(\d+)\]", text)
         if m and self.worker and self.worker.is_alive():
             i, n = int(m.group(1)), int(m.group(2))
-            self._step = f"{i} of {n}"
+            self._count = f"{i} of {n}" if n > 1 else ""
+            self._step = self._count
             self.progress.stop()
             self.progress.configure(mode="determinate", maximum=max(n, 1), value=i - 1)
+        elif self.worker and self.worker.is_alive():
+            for key, stage in self.STAGES:
+                if key in text:
+                    cnt = getattr(self, "_count", "")
+                    self._step = f"{cnt} · {stage}" if cnt else stage
+                    break
         self.log.configure(state="normal")
         self.log.insert("end", text + "\n")
         self.log.see("end")
@@ -1608,7 +1643,7 @@ class App(tk.Tk):
                 elif kind == "poster":
                     self.last_output = Path(val)
                     if self.last_output.suffix.lower() == ".png":
-                        self._refresh_preview()
+                        self._refresh_preview(self._badge_for(self.last_output))
                     else:
                         self.preview.set_text(f"Saved {self.last_output.name}\n"
                                               "(double-click to open)")
@@ -1627,6 +1662,10 @@ class App(tk.Tk):
                     self._after_run()
                 elif kind == "error":
                     self._finish()
+                    if not self._live_run:
+                        self.preview.set_text("This poster could not be made\n"
+                                              "See the log for what went wrong. Earlier posters "
+                                              "are still under Recent.")
                     self._append(f"\n✗ Error: {val}")
                     self.status.configure(text="Error – see the log")
                     self._toggle_log(True)
@@ -1870,7 +1909,7 @@ class MapPicker(tk.Toplevel):
         if self.extent:
             self.extent.delete()
         try:
-            r = float(self.app.v["distance_mi"].get()) * M_PER_MI
+            r = parse_distance(self.app.v["distance_mi"].get(), bare="mi")
             w, h = float(self.app.v["width"].get()), float(self.app.v["height"].get())
             hx, hy = view_half_extents(r, w, h)
             dlat = hy / M_PER_DEG

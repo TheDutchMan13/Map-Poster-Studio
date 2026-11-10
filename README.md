@@ -51,6 +51,30 @@ The whole state is then read from your disk, with no rate limits. Map data is
 also cached, so every theme and every smaller poster of the same spot reuses
 it.
 
+## What's new in 1.6
+
+- About 5x faster rendering. All 17 themes of Phoenix at 40 km take about 70 s
+  instead of 7.5 min. A small poster inside an area you already have cached
+  draws at small-poster speed.
+- Quick preview takes about 2 s. It renders at 100 dpi and is labelled as a
+  preview, with the final size and dpi.
+- Clearer city-scale maps:
+  - Road hierarchy that scales with the area, so driveways and footways become
+    fine texture.
+  - Readable main roads, water and parks on every theme.
+  - Streets no longer run through the title.
+  - Very large protected areas (national-monument size) are skipped.
+- **Classic look** (Details → Roads & shape, or `--classic`) draws exactly like
+  the original maptoposter.
+- The title size matches the original, and long names shrink to fit.
+- Place labels include cities and rank them above suburbs and neighbourhoods.
+- Smaller, faster vector exports:
+  - PDF and SVG drop detail finer than half a printed pixel.
+  - PNGs carry an sRGB colour profile.
+- Radius accepts units (`40 km`, `5000 m`, `800 ft`). Cancel stops within
+  about a second.
+- Map caches rebuild once after the update (new place-label data).
+
 ## Features
 
 **Everything from the original**

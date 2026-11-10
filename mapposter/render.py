@@ -71,6 +71,7 @@ class PosterOptions:
     dpi: int = 300
     road_scale: float = 1.0
     auto_roads: bool = True
+    classic: bool = False             # True = draw exactly like the original maptoposter
     show_text: bool = True
     show_coords: bool = True
     show_gradient: bool = True
@@ -143,6 +144,77 @@ def auto_road_factor(radius_m: float, width: float, height: float) -> float:
     return f * (min(width, height) / 12.0) ** 0.5
 
 
+# City-scale road widths (pt). Blended with ROAD_CLASSES widths by map_detail():
+# close-ups keep the original look, wide areas get a clear hierarchy in which
+# driveways, parking aisles and footways become fine texture instead of haze.
+CITY_WIDTHS = {"motorway": 1.7, "primary": 1.15, "secondary": 0.85,
+               "tertiary": 0.55, "residential": 0.36, "default": 0.24}
+
+# Minimum contrast ratio (WCAG formula) against the background. Only colors below
+# the floor are nudged, toward the theme's own text color, so good themes are untouched.
+CONTRAST_FLOOR = {"road_motorway": 4.5, "road_primary": 3.2, "road_secondary": 2.3,
+                  "road_tertiary": 1.7, "water": 1.2, "parks": 1.12}
+
+# Protected areas bigger than this share of the view AND this size are skipped: at
+# city scale a national monument is a flat block, not a park.
+GIANT_PARK_SHARE = 0.05
+GIANT_PARK_MIN_M2 = 400e6
+
+
+def map_detail(radius_m: float) -> float:
+    """0 at <= 3 km (original look) .. 1 at >= 15 km (city scale)."""
+    import math
+    d = (math.log(max(radius_m, 1)) - math.log(3000)) / (math.log(15000) - math.log(3000))
+    return min(max(d, 0.0), 1.0)
+
+
+def _rel_lum(c) -> float:
+    from matplotlib.colors import to_rgb
+    r, g, b = [(x / 12.92 if x <= 0.04045 else ((x + 0.055) / 1.055) ** 2.4) for x in to_rgb(c)]
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def contrast(a, b) -> float:
+    la, lb = sorted((_rel_lum(a), _rel_lum(b)))
+    return (lb + 0.05) / (la + 0.05)
+
+
+def _lift(color, bg, toward, floor):
+    """Blend color toward `toward` just enough to reach the contrast floor."""
+    from .themes import mix
+    if contrast(color, bg) >= floor:
+        return color
+    if contrast(toward, bg) < floor:   # text itself too weak: use black / white
+        toward = "#000000" if _rel_lum(bg) > 0.18 else "#FFFFFF"
+    lo, hi = 0.0, 1.0
+    for _ in range(18):
+        mid = (lo + hi) / 2
+        if contrast(mix(color, toward, mid), bg) >= floor:
+            hi = mid
+        else:
+            lo = mid
+    return mix(color, toward, hi)
+
+
+def tuned_theme(theme: dict, detail: float) -> dict:
+    """Print-quality color adjustments, computed from the theme itself."""
+    from .themes import mix
+    t = dict(theme)
+    bg = t["bg"]
+    for key, floor in CONTRAST_FLOOR.items():
+        t[key] = _lift(t[key], bg, t["text"], floor)
+    # keep the hierarchy readable: minor roads always sit below residential streets
+    minor = mix(bg, t["road_residential"], 0.75)
+    t["road_default"] = mix(t["road_default"], minor, detail)
+    t["road_residential"] = mix(t["road_residential"], bg, 0.1 * detail)
+    return t
+
+
+def road_width(cls: str, detail: float) -> float:
+    base = ROAD_CLASSES[cls][1]
+    return base + (CITY_WIDTHS[cls] - base) * detail
+
+
 # ------------------------------------------------------------------ layers
 
 class _Projector:
@@ -179,61 +251,157 @@ def _lines_to_segments(geoms):
     return np.split(coords, cuts)
 
 
+def _lines_path(geoms):
+    """Lines/MultiLines -> ONE compound matplotlib Path (MOVETO per line).
+    Building 600k separate Path objects for a LineCollection costs far more than
+    drawing them; a single path draws the same pixels."""
+    from matplotlib.path import Path as MPath
+    import shapely
+
+    parts = shapely.get_parts(np.asarray(geoms))
+    if len(parts) == 0:
+        return None
+    coords, idx = shapely.get_coordinates(parts, return_index=True)
+    if len(coords) < 2:
+        return None
+    codes = np.full(len(coords), MPath.LINETO, dtype=MPath.code_type)
+    codes[0] = MPath.MOVETO
+    codes[np.flatnonzero(np.diff(idx)) + 1] = MPath.MOVETO
+    return MPath(coords, codes)
+
+
 def _poly_path(geoms):
     """Polygons -> one compound matplotlib Path (fast, holes respected)."""
     from matplotlib.path import Path as MPath
     import shapely
 
-    verts, codes = [], []
-    for poly in shapely.get_parts(np.asarray(geoms)):
-        if poly.is_empty or poly.geom_type != "Polygon":
-            continue
-        for ring in [poly.exterior, *poly.interiors]:
-            r = np.asarray(ring.coords)
-            if len(r) < 4:
-                continue
-            verts.append(r)
-            codes.append([MPath.MOVETO] + [MPath.LINETO] * (len(r) - 2) + [MPath.CLOSEPOLY])
-    if not verts:
+    polys = shapely.get_parts(np.asarray(geoms))
+    polys = polys[shapely.get_type_id(polys) == 3] if len(polys) else polys
+    if len(polys) == 0:
         return None
-    return MPath(np.concatenate(verts), np.concatenate(codes))
+    nint = shapely.get_num_interior_rings(polys)
+    owner = np.repeat(np.arange(len(polys)), nint)
+    nth = np.arange(len(owner)) - np.repeat(np.cumsum(nint) - nint, nint)
+    # exterior then holes, per polygon (same order as before)
+    rings = np.empty(len(polys) + len(owner), dtype=object)
+    order = np.argsort(np.r_[np.arange(len(polys)), owner], kind="stable")
+    rings[:] = np.r_[shapely.get_exterior_ring(polys),
+                     shapely.get_interior_ring(polys[owner], nth)][order]
+    rings = rings[shapely.get_num_coordinates(rings) >= 4]
+    if len(rings) == 0:
+        return None
+    coords, idx = shapely.get_coordinates(rings, return_index=True)
+    starts = np.r_[0, np.flatnonzero(np.diff(idx)) + 1]
+    ends = np.r_[starts[1:], len(coords)] - 1
+    codes = np.full(len(coords), MPath.LINETO, dtype=MPath.code_type)
+    codes[starts] = MPath.MOVETO
+    codes[ends] = MPath.CLOSEPOLY
+    return MPath(coords, codes)
 
 
-def _add_polys(ax, geoms, color, zorder, gid, clip):
+def _add_polys(ax, path, color, zorder, gid, clip):
     from matplotlib.patches import PathPatch
-    path = _poly_path(geoms)
     if path is None:
         return
     patch = PathPatch(path, facecolor=color, edgecolor="none", linewidth=0, zorder=zorder)
     patch.set_gid(gid)
-    ax.add_patch(patch)
+    # add_artist, not add_patch: add_patch walks every vertex to update the data
+    # limits (15 s at city scale), and our limits are fixed anyway.
+    ax.add_artist(patch)
     clip.append(patch)
 
 
-def _add_lines(ax, geoms, color, width, zorder, gid, clip, **kw):
+def _add_path_lines(ax, path, color, width, zorder, gid, clip):
+    from matplotlib.patches import PathPatch
+    if path is None:
+        return
+    patch = PathPatch(path, facecolor="none", edgecolor=color, linewidth=width,
+                      capstyle="round", joinstyle="round", zorder=zorder)
+    patch.set_gid(gid)
+    ax.add_artist(patch)
+    clip.append(patch)
+
+
+def _add_lines(ax, segs, color, width, zorder, gid, clip, **kw):
     from matplotlib.collections import LineCollection
-    segs = _lines_to_segments(geoms)
     if not segs:
         return
     lc = LineCollection(segs, colors=color, linewidths=width, capstyle="round",
                         joinstyle="round", zorder=zorder, **kw)
     lc.set_gid(gid)
-    ax.add_collection(lc)
+    ax.add_collection(lc, autolim=False)
     clip.append(lc)
 
 
-def _gradient(ax, color, where, extend=0.0):
+def _simplify(geoms, tol, polygons=False):
+    """Vector export: drop detail finer than half a printed pixel. Invisible on paper,
+    but it is most of the file size of a city-scale PDF / SVG."""
+    import shapely
+    if not tol or len(geoms) == 0:
+        return geoms
+    b = shapely.bounds(geoms)
+    big = np.maximum(b[:, 2] - b[:, 0], b[:, 3] - b[:, 1]) >= tol
+    geoms = shapely.simplify(geoms[big], tol, preserve_topology=polygons)
+    return geoms[~shapely.is_empty(geoms)]
+
+
+def _prepared(data, P, view_area=None, tol=0.0):
+    """Projected, theme-independent drawing paths, built once per data + projection
+    and reused for every theme of an all-themes run."""
+    import shapely
+    key = (P.crs.to_string(), round(view_area or 0), round(tol, 2))
+    store = data.__dict__.setdefault("_prep", {})
+    if key in store:
+        return store[key]
+    store.clear()  # one projection at a time keeps memory flat
+    prep = {"polys": {}, "lines": {}, "roads": {}}
+    for name in POLY_LAYERS:
+        g = data.layer(name)
+        if g is not None:
+            geoms = P.gdf(g).geometry.values
+            if name == "parks" and view_area:
+                big = shapely.area(geoms) > max(GIANT_PARK_SHARE * view_area, GIANT_PARK_MIN_M2)
+                if big.any():
+                    log(f"  (skipping {int(big.sum())} protected area(s) larger than "
+                        f"{GIANT_PARK_SHARE:.0%} of the map)")
+                    geoms = geoms[~big]
+            prep["polys"][name] = _poly_path(_simplify(geoms, tol, polygons=True))
+    for name in LINE_LAYERS:
+        g = data.layer(name)
+        if g is not None:
+            geoms = _simplify(P.gdf(g).geometry.values, tol)
+            prep["lines"][name] = (_lines_to_segments(geoms) if name in DASHED
+                                   else _lines_path(geoms))
+    roads = P.gdf(data.roads)
+    if roads is not None and data.layer("trails") is not None:
+        roads = roads[~roads["highway"].isin(TRAIL_HIGHWAYS)]
+    if roads is not None:
+        classes = roads["highway"].map(lambda v: _HIGHWAY_TO_CLASS.get(v, "default")).to_numpy()
+        for cls in ROAD_CLASSES:
+            prep["roads"][cls] = _lines_path(_simplify(roads.geometry.values[classes == cls], tol))
+    store[key] = prep
+    return prep
+
+
+def _gradient(ax, color, where, extend=0.0, classic=False):
     """Fade on the trim axes. `extend` = extra fraction past the trim edge (bleed),
-    filled solid so the fade still reaches the paper edge."""
+    filled solid so the fade still reaches the paper edge. The non-classic curve stays
+    solid under the text block and eases out, so streets don't run through the title."""
     import matplotlib.colors as mcolors
 
     rgba = np.zeros((256, 4))
     rgba[:, :3] = mcolors.to_rgb(color)
+    u = np.linspace(0, 1, 256)
+    if classic:
+        fade = 1 - u
+    else:
+        v = np.clip((u - 0.3) / 0.7, 0, 1)
+        fade = 1 - v * v * (3 - 2 * v)
     if where == "bottom":
-        rgba[:, 3] = np.linspace(1, 0, 256)
+        rgba[:, 3] = fade
         y0, y1 = 0.0, 0.25
     else:
-        rgba[:, 3] = np.linspace(0, 1, 256)
+        rgba[:, 3] = fade[::-1]
         y0, y1 = 0.75, 1.0
     grad = np.linspace(0, 1, 256).reshape(-1, 1)
     im = ax.imshow(np.hstack((grad, grad)), extent=[0, 1, y0, y1], transform=ax.transAxes,
@@ -310,17 +478,26 @@ def render_poster(data: MapData, theme: dict, opts: PosterOptions, output: Path)
 
     clip_targets: list = []
     rs = opts.road_scale * (auto_road_factor(opts.radius_m, w, h) if opts.auto_roads else 1.0)
+    detail = 0.0 if opts.classic else map_detail(opts.radius_m)
+    if not opts.classic:
+        theme = tuned_theme(theme, detail)
 
     # --- base layers
     coast = data.layer("coastline")
     if coast is not None:
         sea = ocean_polygons(P.gdf(coast).geometry.values, view_box)
         if sea:
-            _add_polys(ax, sea, theme["ocean"], 0.4, "ocean", clip_targets)
+            _add_polys(ax, _poly_path(sea), theme["ocean"], 0.4, "ocean", clip_targets)
+    cancel = opts.check_cancel or (lambda: None)
+    cancel()
+    tol = 0.0
+    if opts.fmt in ("pdf", "svg"):
+        tol = 0.5 * (2 * HX) / (W * 300)   # half a 300 dpi pixel, in map meters
+    prep = _prepared(data, P, None if opts.classic else (x1 - x0) * (y1 - y0), tol)
+    cancel()
     for name, (ckey, z) in POLY_LAYERS.items():
-        g = data.layer(name)
-        if g is not None:
-            _add_polys(ax, P.gdf(g).geometry.values, theme[ckey], z, name, clip_targets)
+        if name in prep["polys"]:
+            _add_polys(ax, prep["polys"][name], theme[ckey], z, name, clip_targets)
     if opts.terrain != "none":
         from .decor import draw_terrain
         draw_terrain(ax, P, (x0, x1, y0, y1), theme, opts.terrain,
@@ -328,21 +505,20 @@ def render_poster(data: MapData, theme: dict, opts: PosterOptions, output: Path)
                      opts.terrain_strength, rs, clip_targets,
                      opts.check_cancel or (lambda: None))
     for name, (ckey, lw, z) in LINE_LAYERS.items():
-        g = data.layer(name)
-        if g is not None:
-            kw = {"linestyles": DASHED[name]} if name in DASHED else {}
-            _add_lines(ax, P.gdf(g).geometry.values, theme[ckey], lw * rs, z, name,
-                       clip_targets, **kw)
+        if name not in prep["lines"]:
+            continue
+        if name in DASHED:
+            _add_lines(ax, prep["lines"][name], theme[ckey], lw * rs, z, name,
+                       clip_targets, linestyles=DASHED[name])
+        else:
+            _add_path_lines(ax, prep["lines"][name], theme[ckey], lw * rs, z, name,
+                            clip_targets)
 
-    roads = P.gdf(data.roads)
-    if roads is not None and data.layer("trails") is not None:
-        roads = roads[~roads["highway"].isin(TRAIL_HIGHWAYS)]
-    if roads is not None:
-        classes = roads["highway"].map(lambda v: _HIGHWAY_TO_CLASS.get(v, "default")).to_numpy()
-        for cls, (ckey, lw, order) in sorted(ROAD_CLASSES.items(), key=lambda kv: kv[1][2]):
-            sub = roads.geometry.values[classes == cls]
-            _add_lines(ax, sub, theme[ckey], lw * rs, 2 + order / 10, f"roads-{cls}",
-                       clip_targets)
+    for cls, (ckey, lw, order) in sorted(ROAD_CLASSES.items(), key=lambda kv: kv[1][2]):
+        if cls in prep["roads"]:
+            _add_path_lines(ax, prep["roads"][cls], theme[ckey],
+                            road_width(cls, detail) * rs, 2 + order / 10,
+                            f"roads-{cls}", clip_targets)
 
     # --- overlays
     scale = min(w, h) / 12.0
@@ -403,8 +579,8 @@ def render_poster(data: MapData, theme: dict, opts: PosterOptions, output: Path)
 
     if opts.show_gradient and not shaped:
         ext_b = b / h
-        _gradient(tax, theme["gradient_color"], "bottom", ext_b)
-        _gradient(tax, theme["gradient_color"], "top", ext_b)
+        _gradient(tax, theme["gradient_color"], "bottom", ext_b, opts.classic)
+        _gradient(tax, theme["gradient_color"], "top", ext_b, opts.classic)
 
     # markers (above fades so they stay crisp)
     fp = _fp_factory(opts.fonts)
@@ -432,23 +608,35 @@ def render_poster(data: MapData, theme: dict, opts: PosterOptions, output: Path)
         city = opts.display_city or opts.city
         country = opts.display_country or opts.country_label or opts.country
         label = style_title(city, opts.title_style, opts.letter_spacing)
+        # Same rule as the original: shrink only when the NAME is over 10 letters.
         main_size = 60 * scale
-        if len(label) > 10 and opts.title_style == "spaced" and opts.letter_spacing >= 2:
+        if len(city) > 10:
             main_size = max(main_size * 10 / len(city), 10 * scale)
-        elif len(label) > 16:
-            main_size = max(main_size * 16 / len(label), 10 * scale)
 
         if opts.text_position == "top":
             ys = {"city": 0.885, "line": 0.872, "country": 0.84, "coords": 0.812, "tag": 0.787}
         else:
             ys = {"city": 0.14, "line": 0.125, "country": 0.10, "coords": 0.07, "tag": 0.045}
 
+        text_halo = None if opts.classic else [
+            pe.withStroke(linewidth=3.5 * scale, foreground=theme["gradient_color"])]
+
         def put(y, s, weight, size, gid, alpha=1.0):
             t = tax.text(0.5, y, s, transform=tax.transAxes, color=text_color, ha="center",
-                         alpha=alpha, fontproperties=fp(weight, size), zorder=11)
+                         alpha=alpha, fontproperties=fp(weight, size), zorder=11,
+                         path_effects=text_halo)
             t.set_gid(gid)
+            return t
 
-        put(ys["city"], label, "bold", main_size, "text-city")
+        city_t = put(ys["city"], label, "bold", main_size, "text-city")
+        # Never let the title run off the paper (long names, wide spacing, fonts).
+        try:
+            ext = city_t.get_window_extent(fig.canvas.get_renderer())
+            avail = 0.9 * tax.get_window_extent().width
+            if ext.width > avail:
+                city_t.set_fontsize(main_size * avail / ext.width)
+        except Exception:
+            pass
         put(ys["country"], country.upper() if is_latin_script(country) else country,
             "light", 22 * scale, "text-country")
         if opts.show_coords:
@@ -524,7 +712,8 @@ def render_poster(data: MapData, theme: dict, opts: PosterOptions, output: Path)
         credit += "  ·  " + ATTRIBUTION
     att = tax.text(0.98, 0.012 if opts.border == "none" else 0.045,
                    credit, transform=tax.transAxes,
-                   color=text_color, alpha=0.5, ha="right", va="bottom",
+                   color=text_color, alpha=0.5 if opts.classic else 0.72,
+                   ha="right", va="bottom",
                    fontproperties=fp("light", 8), zorder=13)
     att.set_gid("text-attribution")
 
@@ -532,16 +721,36 @@ def render_poster(data: MapData, theme: dict, opts: PosterOptions, output: Path)
         from .decor import draw_crop_marks
         draw_crop_marks(fig, slug, b, w, h)
 
+    cancel()
+    log("  Saving…")
     output.parent.mkdir(parents=True, exist_ok=True)
     kw = dict(facecolor=fig.get_facecolor(), format=opts.fmt)
     if opts.fmt == "png":
         kw["dpi"] = opts.dpi
+        # Tag the PNG as sRGB so print shops and photo apps don't guess the color space.
+        icc = _srgb_icc()
+        if icc:
+            kw["pil_kwargs"] = {"icc_profile": icc, "dpi": (opts.dpi, opts.dpi)}
     fig.savefig(output, **kw)
     fig.clear()
     if opts.fmt == "svg":
         _svg_to_layers(output)
     log(f"✓ Saved {output}")
     return output
+
+
+_SRGB = None
+
+
+def _srgb_icc() -> bytes | None:
+    global _SRGB
+    if _SRGB is None:
+        try:
+            from PIL import ImageCms
+            _SRGB = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
+        except Exception:
+            _SRGB = b""
+    return _SRGB or None
 
 
 # ------------------------------------------------------------- layered svg

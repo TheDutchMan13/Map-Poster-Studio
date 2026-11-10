@@ -268,6 +268,7 @@ class PreviewCanvas(ttk.Frame):
         self._cache_key = None
         self._cache_img = None
         self._text = ""
+        self.badge = ""                  # e.g. "PREVIEW · 100 dpi — final: 12 × 16 in, 300 dpi"
         self._fg = "#202020"
         self._muted = "#808080"
         self._line = "#444444"
@@ -325,8 +326,9 @@ class PreviewCanvas(ttk.Frame):
         self._show_bar(False)
         self.redraw()
 
-    def set_image(self, path: Path) -> None:
+    def set_image(self, path: Path, badge: str = "") -> None:
         from PIL import Image
+        self.badge = badge
         with Image.open(path) as im:
             im = im.convert("RGB")
             if max(im.size) > self.MAX_SIDE:
@@ -429,6 +431,14 @@ class PreviewCanvas(ttk.Frame):
         cv.create_rectangle(cx - hw - 1, cy - hh - 1, cx + hw + 1, cy + hh + 1,
                             outline=self._line, width=1)
         cv.create_image(cx, cy, image=self._cache_img, anchor="center")
+        if self.badge:
+            font = ("Segoe UI Semibold", 9) if _WIN else ("DejaVu Sans", 8, "bold")
+            tid = cv.create_text(cx, cy - hh - 10, text=self.badge, fill=self._fg, font=font,
+                                 anchor="s")
+            x0, y0, x1, y1 = cv.bbox(tid)
+            rid = cv.create_rectangle(x0 - 8, y0 - 3, x1 + 8, y1 + 3, fill=cv.cget("bg"),
+                                      outline=self._line)
+            cv.tag_raise(tid, rid)
         if rw > cw:
             cv.xview_moveto(max(0.0, min(1.0, fx - (cw / rw) / 2)))
         if rh > ch:

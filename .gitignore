@@ -16,3 +16,7 @@ layers.json
 # bundled fonts and default themes must be in the repo
 !mapposter/resources/fonts/
 !mapposter/resources/themes/
+
+# audit / before-after comparison output
+/before/
+/after/

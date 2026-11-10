@@ -17,7 +17,13 @@ from .units import M_PER_MI, fmt_miles, parse_distance
 from .sources import bbox_for, view_half_extents
 
 MAX_INCHES = 36.0
-PREVIEW_DPI = 60
+PREVIEW_DPI = 100   # about screen size for a 12x16 poster; thin lines still show
+PREVIEW_MAX_PX = 1800
+
+
+def preview_dpi(width: float, height: float) -> int:
+    """Preview resolution: 100 dpi, but never more than ~1800 px on the long side."""
+    return max(30, min(PREVIEW_DPI, int(PREVIEW_MAX_PX / max(width, height, 1))))
 
 
 @dataclass
@@ -39,6 +45,7 @@ class Job:
     dpi: int = 300
     road_scale: float = 1.0
     auto_roads: bool = True
+    classic: bool = False              # draw exactly like the original maptoposter
     show_text: bool = True
     show_coords: bool = True
     show_gradient: bool = True
@@ -196,9 +203,14 @@ def run(job: Job, check_cancel=lambda: None, on_output=lambda p: None) -> list[P
     grow_y = (job.height + 2 * job.bleed) / job.height
     shift = 0.08 * 2 * hy if job.shape in ("circle", "heart", "boundary") else 0
     bbox = bbox_for(lat, lon, hx * grow_x, hy * grow_y + shift)
+    layers = job.layers
+    if "places" in (job.labels or []):   # place labels need the place-name data
+        layers = list(layers if layers is not None else paths.default_enabled_layers())
+        if "places" not in layers:
+            layers.append("places")
     data = sources.get_map_data(lat, lon, radius, job.width, job.height,
                                 pbf=job.pbf or None, use_cache=job.use_cache,
-                                check_cancel=check_cancel, enabled=job.layers, bbox=bbox,
+                                check_cancel=check_cancel, enabled=layers, bbox=bbox,
                                 allow_empty=job.terrain != "none")
     check_cancel()
 
@@ -219,8 +231,8 @@ def run(job: Job, check_cancel=lambda: None, on_output=lambda p: None) -> list[P
             country_label=job.country_label or None,
             fonts=font_files,
             fmt="png" if job.preview else job.fmt,
-            dpi=PREVIEW_DPI if job.preview else job.dpi,
-            road_scale=job.road_scale, auto_roads=job.auto_roads,
+            dpi=preview_dpi(job.width, job.height) if job.preview else job.dpi,
+            road_scale=job.road_scale, auto_roads=job.auto_roads, classic=job.classic,
             show_text=job.show_text, show_coords=job.show_coords,
             show_gradient=job.show_gradient,
             text_position=job.text_position, title_style=job.title_style,
@@ -356,12 +368,13 @@ def run_set(job: Job, check_cancel=lambda: None, on_output=lambda p: None) -> li
             kw.update(change)
             kw.update(themes=[theme_name], fmt="png", output_dir=str(tmp), mockup=None,
                       icc=None, crop_marks=False, bleed=0.0, set_places=[], zoom_series=[],
-                      preview=False, dpi=PREVIEW_DPI if job.preview else job.dpi)
+                      preview=False,
+                      dpi=preview_dpi(job.width, job.height) if job.preview else job.dpi)
             sub = Job(**kw)
             imgs += run(sub, check_cancel)
         bg = themes.load_theme(theme_name)["bg"]
         ims = [Image.open(p).convert("RGB") for p in imgs]
-        dpi = PREVIEW_DPI if job.preview else job.dpi
+        dpi = preview_dpi(job.width, job.height) if job.preview else job.dpi
         gap = int(job.set_gap * dpi)
         Wt = sum(im.width for im in ims) + gap * (len(ims) + 1)
         Ht = max(im.height for im in ims) + 2 * gap

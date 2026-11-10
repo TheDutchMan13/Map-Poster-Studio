@@ -114,15 +114,29 @@ def draw_labels(fig, ax, tax, data, P, theme, kinds, fp, scale, label_scale, vie
     # places first (most important), then parks, then streets
     if "places" in kinds and data.layer("places") is not None:
         g = P.gdf(data.layer("places"))
-        for geom, name in zip(g.geometry.values, g["name"].values):
-            if not name or not inside(geom):
+        cls = g["place"].values if "place" in g.columns else [None] * len(g)
+        # bigger places first; small ones only where there is room for them
+        rank = {"city": 0, "town": 1, "suburb": 2, "village": 3, "quarter": 4,
+                "neighbourhood": 5, "hamlet": 6}
+        size = {0: 11, 1: 9, 2: 7.5, 3: 7, 4: 6.5, 5: 6.5, 6: 6}
+        skip_from = 4 if vw > 30000 else 5 if vw > 12000 else 99   # neighbourhoods at city scale
+        items = sorted(((rank.get(c, 5), geom, name) for geom, name, c
+                        in zip(g.geometry.values, g["name"].values, cls) if name),
+                       key=lambda it: it[0])
+        seen = set()
+        for r, geom, name in items:
+            key = str(name).strip().lower()
+            if r >= skip_from or key in seen or not inside(geom):
                 continue
             label = " ".join(str(name).upper()) if len(name) < 14 else str(name).upper()
             t = ax.text(geom.x, geom.y, label, ha="center", va="center", color=color,
-                        alpha=0.85, fontproperties=fp("regular", 7.5 * scale * label_scale),
+                        alpha=0.9 if r <= 1 else 0.8,
+                        fontproperties=fp("bold" if r == 0 else "regular",
+                                          size[r] * scale * label_scale),
                         zorder=11.5, path_effects=halo)
             t.set_gid("labels-places")
-            try_place(t)
+            if try_place(t):
+                seen.add(key)
 
     if "parks" in kinds and data.layer("parks") is not None:
         g = P.gdf(data.layer("parks"))
