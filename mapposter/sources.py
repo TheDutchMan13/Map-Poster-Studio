@@ -70,6 +70,20 @@ def clip_to_bbox(data: MapData, bbox) -> MapData:
     return MapData(sub(data.roads), {k: sub(v) for k, v in data.layers.items()}, tuple(bbox))
 
 
+# A .pbf scan costs about the same whatever the box, so the first read of a place
+# covers at least this far from the center. Later posters of the same metro (other
+# spots, smaller radius, other shape) then come straight from the cache.
+MIN_PBF_READ_M = 25000
+
+
+def pbf_read_box(bbox):
+    w, s_, e, n = square_bbox(bbox)
+    cx, cy = (w + e) / 2, (s_ + n) / 2
+    half = max((n - s_) / 2, MIN_PBF_READ_M / M_PER_DEG)          # latitude degrees
+    k = math.cos(math.radians(cy))
+    return (cx - half / k, cy - half, cx + half / k, cy + half)
+
+
 def square_bbox(bbox):
     """Smallest lon/lat box around bbox's center that is square on the ground, so a
     portrait and a landscape poster of the same spot share one .pbf read."""
@@ -244,7 +258,9 @@ def _fetch_online(bbox, layers: dict, check_cancel) -> MapData:
     log(f"Downloading OpenStreetMap data for ~{area_sqmi:,.0f} sq mi "
         "(large areas can take a long time)...")
 
-    log(f"  [1/{len(layers) + 1}] Streets...")
+    # (no "[i/n]" here: the window reads that pattern as theme progress)
+    t_all = t0 = time.time()
+    log(f"  Streets (1 of {len(layers) + 1})...")
     roads = ox.features_from_bbox(bbox, tags={"highway": True})
     check_cancel()
     roads = roads[roads.geometry.geom_type.isin(["LineString", "MultiLineString"])]
@@ -259,21 +275,23 @@ def _fetch_online(bbox, layers: dict, check_cancel) -> MapData:
     if "name" not in roads.columns:
         roads["name"] = None
     roads = roads[["highway", "name", "geometry"]].reset_index(drop=True)
-    log(f"      {len(roads):,} street segments")
+    log(f"      {len(roads):,} street segments  ({time.time() - t0:.0f}s)")
 
     feats = {}
     total = len(layers) + 1
     for i, (name, spec) in enumerate(layers.items(), start=2):
-        log(f"  [{i}/{total}] {name.capitalize()}...")
+        log(f"  {name.capitalize()} ({i} of {total})...")
+        t0 = time.time()
         try:
             g = ox.features_from_bbox(bbox, tags=spec["tags"])
             feats[name] = _keep(g, spec["kind"])
         except Exception as e:  # osmnx raises when nothing matches
             log(f"      none found ({type(e).__name__})")
             feats[name] = _empty_gdf()
-        log(f"      {len(feats[name]):,} features")
+        log(f"      {len(feats[name]):,} features  ({time.time() - t0:.0f}s)")
         check_cancel()
 
+    log(f"✓ Download finished in {time.time() - t_all:,.0f}s (saved to the cache)")
     return MapData(roads, feats, tuple(bbox))
 
 
@@ -485,7 +503,7 @@ def get_map_data(lat: float, lon: float, radius_m: float, width: float, height: 
 
     # Reading a .pbf costs the same whatever the box, so read a square: the cache
     # then also serves the other orientation. Online stays exact (server load).
-    read_box = square_bbox(bbox) if pbf else bbox
+    read_box = pbf_read_box(bbox) if pbf else bbox
     data = (_read_pbf(pbf, read_box, layers, check_cancel) if pbf
             else _fetch_online(bbox, layers, check_cancel))
     if len(data.roads) == 0:

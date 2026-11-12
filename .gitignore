@@ -20,3 +20,6 @@ layers.json
 # audit / before-after comparison output
 /before/
 /after/
+
+# regression test scratch output
+/tests/output/

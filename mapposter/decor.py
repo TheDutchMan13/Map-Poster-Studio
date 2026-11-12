@@ -178,6 +178,10 @@ def draw_labels(fig, ax, tax, data, P, theme, kinds, fp, scale, label_scale, vie
                             groups.append((best, -part.length, name, part))
             groups.sort(key=lambda g: (g[0], g[1]))
             size = {0: 7, 1: 7, 2: 6.5, 3: 6}
+            # map meters per typographic point, to set names beside the line, not on it
+            ax_pt = ax.get_window_extent(renderer).width * 72 / fig.dpi
+            m_per_pt = vw / max(ax_pt, 1)
+            named: dict = {}      # name -> placed points (divided roads have 2 lines)
             for best, _, name, line in groups[:400]:
                 n_labels = max(1, int(line.length / (vw * 0.55)))
                 for k in range(n_labels):
@@ -187,18 +191,26 @@ def draw_labels(fig, ax, tax, data, P, theme, kinds, fp, scale, label_scale, vie
                     mid = line.interpolate(d)
                     if not inside(mid):
                         continue
+                    near = vw * 0.12
+                    if any(abs(mid.x - px) < near and abs(mid.y - py) < near
+                           for px, py in named.get(name, ())):
+                        continue
                     ang = math.degrees(math.atan2(b2.y - a.y, b2.x - a.x))
                     if ang > 90:
                         ang -= 180
                     elif ang < -90:
                         ang += 180
-                    t = ax.text(mid.x, mid.y, str(name), rotation=ang, rotation_mode="anchor",
+                    fs = size.get(best, 5.5) * scale * label_scale
+                    gap = (0.62 * fs + 1.4 * scale) * m_per_pt     # half the text + road
+                    rad = math.radians(ang)
+                    tx, ty = mid.x - math.sin(rad) * gap, mid.y + math.cos(rad) * gap
+                    t = ax.text(tx, ty, str(name), rotation=ang, rotation_mode="anchor",
                                 ha="center", va="center", color=color,
-                                fontproperties=fp("regular",
-                                                  size.get(best, 5.5) * scale * label_scale),
+                                fontproperties=fp("regular", fs),
                                 zorder=11.3, path_effects=halo)
                     t.set_gid("labels-roads")
-                    try_place(t)
+                    if try_place(t):
+                        named.setdefault(name, []).append((mid.x, mid.y))
     log(f"  {count} labels placed")
 
 

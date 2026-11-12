@@ -39,6 +39,9 @@ pyinstaller --noconfirm --clean MapPosterStudio.spec || goto :fail
 echo Smoke test...
 dist\MapPosterStudio\MapPosterStudio.exe --list-themes >nul || goto :fail
 
+echo Theme regression test...
+python tests\regress.py >nul 2>&1 && echo   all themes match the baseline. || echo   WARNING: theme regression test found changes. Run run_tests.bat to see them.
+
 echo.
 echo ============================================================
 echo  Built: %cd%\dist\MapPosterStudio\MapPosterStudio.exe

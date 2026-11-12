@@ -22,6 +22,22 @@ Start menu entry, an optional desktop shortcut and an uninstaller. It installs
 for your user only, with no admin prompt. Uninstalling removes downloaded
 caches but keeps your posters, themes and presets.
 
+**Theme test:** double-click **`run_tests.bat`**. It renders a small saved map of
+downtown Phoenix in every theme (about 5 seconds, no internet needed) and
+compares each image with `tests\baseline\`. Differences go to
+`tests\output\*_diff.png` (baseline | now | difference). When a look change is
+intended, run `run_tests.bat --update` and commit the new baseline. `build.bat`
+runs the same test and warns if anything changed.
+
+**Releasing:** commit, raise `__version__` in `mapposter\__init__.py` and in
+`installer\MapPosterStudio.iss`, add a "What's new in X.Y" section here, then
+run `tools\push_release.ps1`. It runs the theme test, pushes `main`, and tags
+the version. GitHub then builds the exe and installer, runs the theme test
+again and publishes the release with these notes
+(`.github\workflows\release.yml`). With `-Local` it builds on your PC instead.
+The **Run workflow** button under the Actions tab does a dry run: it builds and
+tests but publishes nothing.
+
 ## Use it
 
 **Double-click `MapPosterStudio.exe`** to open the window. Fill in the city,
@@ -50,6 +66,28 @@ areas. Use a local extract instead:
 The whole state is then read from your disk, with no rate limits. Map data is
 also cached, so every theme and every smaller poster of the same spot reuses
 it.
+
+## What's new in 1.7
+
+- All-themes runs draw several themes at once, one per CPU core, limited by
+  free memory. In testing, 17 themes took 39 s instead of 69 s on 2 cores.
+  Change it under Output → Parallel renders, or with `--workers N`.
+- The first poster of a place reads at least 25 km around it from a .pbf file,
+  so later posters nearby come from the cache in about 2 s instead of
+  re-reading the file.
+- The status line shows a percentage while a poster draws.
+- Street names sit beside their road instead of on top of it, and divided
+  roads are named once.
+- Size panel:
+  - a live pixel readout (e.g. "3,600 × 4,800 px · 17 MP");
+  - a portrait/landscape swap button;
+  - A1, 20 × 30 and 24 × 24 presets;
+  - screen presets set 300 dpi PNG.
+- A "new version available" button appears when a newer release is on
+  GitHub. It checks once a day and can be turned off under Output.
+- Online downloads log how long each part took.
+- The theme regression test (`run_tests.bat`) and automatic GitHub releases
+  are described under "Build the exe".
 
 ## What's new in 1.6
 

@@ -188,6 +188,9 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--mockup", choices=["black", "white", "oak"],
                    help="Also save a framed-on-a-wall mockup image for each PNG")
     p.add_argument("--no-cache", action="store_true", help="Ignore cached map data")
+    p.add_argument("--workers", type=int, default=0, metavar="N",
+                   help="Themes rendered at the same time (0 = auto from cores and "
+                        "memory, 1 = one at a time)")
     p.add_argument("--gui", action="store_true", help="Open the window")
     p.add_argument("--debug", action="store_true", help="Show full error tracebacks")
     return p
@@ -286,7 +289,7 @@ def main(argv: list[str] | None = None) -> int:
             auto_roads=not args.no_auto_roads, classic=args.classic,
             show_text=not args.no_text, show_coords=not args.no_coords,
             show_gradient=not args.no_gradient, pbf=args.pbf,
-            output_dir=args.output_dir, use_cache=not args.no_cache,
+            output_dir=args.output_dir, use_cache=not args.no_cache, workers=args.workers,
             layers=args.layers, text_position=args.text_position,
             title_style=args.title_style, letter_spacing=args.letter_spacing,
             tagline=args.tagline, border=args.border, shape=args.shape,

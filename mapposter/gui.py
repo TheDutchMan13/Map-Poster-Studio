@@ -39,6 +39,9 @@ SIZE_PRESETS = {
     "A4 (8.3 × 11.7)": (8.3, 11.7),
     "A3 (11.7 × 16.5)": (11.7, 16.5),
     "A2 (16.5 × 23.4)": (16.5, 23.4),
+    "A1 (23.4 × 33.1)": (23.4, 33.1),
+    "Poster 20 × 30 in": (20, 30),
+    "Square 24 × 24 in": (24, 24),
     "Landscape 16 × 12": (16, 12),
     "Square 1080 px (3.6 × 3.6)": (3.6, 3.6),
     "Instagram post 1080 × 1350": (3.6, 4.5),
@@ -60,6 +63,7 @@ DEFAULTS = {
     "distance_mi": "6", "source": "online", "pbf": "",
     "width": "12", "height": "16", "fmt": "png", "dpi": "300", "bleed": "0",
     "font": "", "road_scale": "1.0", "auto_roads": True, "classic": False,
+    "workers": "Auto", "check_updates": True,
     "show_text": True, "show_coords": True, "show_gradient": True,
     "themes": ["terracotta"], "region": "north-america/us/arizona",
     "text_position": "bottom", "title_style": "spaced", "letter_spacing": "2",
@@ -246,8 +250,11 @@ class App(tk.Tk):
         self._update_undo_buttons()
         self._ready = True
         set_sink(lambda m: self.q.put(("log", m)))
+        from .log import set_progress_sink
+        set_progress_sink(lambda f: self.q.put(("progress", f)))
         self.after(100, self._poll)
         self.after(600, self._scan_recent)
+        self.after(3000, self._check_updates)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _restore_geometry(self) -> None:
@@ -401,16 +408,18 @@ class App(tk.Tk):
         bb.pack(fill="x", side="bottom")
         ttk.Separator(main).pack(fill="x", side="bottom")
         ttk.Label(bb, text="Recent", style="Muted.TLabel").pack(side="left", padx=(0, 12))
-        self.recent_row = ttk.Frame(bb, height=88)
-        self.recent_row.pack(side="left", fill="y")
+        self.recent_row = ttk.Frame(bb, height=88)   # packed last: it gives way first
         self.log_btn = ttk.Button(bb, text="Log", width=8, command=self._toggle_log)
         self.log_btn.pack(side="right", padx=(14, 0))
-        pbx = ttk.Frame(bb, width=230, height=88)
+        # shown only when a newer release exists
+        self.update_btn = ttk.Button(bb, text="", style="Accent.TButton")
+        pbx = self.pbx = ttk.Frame(bb, width=230, height=88)
         pbx.pack(side="right", fill="y")
         pbx.pack_propagate(False)
         self.status = ttk.Label(pbx, text="Ready", anchor="e", style="Muted.TLabel")
         self.status.pack(side="top", fill="x", pady=(30, 6))
         self.progress = ttk.Progressbar(pbx, mode="indeterminate")
+        self.recent_row.pack(side="left", fill="y")
 
         self.pane = ttk.PanedWindow(main, orient="vertical")
         self.pane.pack(fill="both", expand=True)
@@ -734,6 +743,48 @@ class App(tk.Tk):
             row=3, column=0, columnspan=2, sticky="w")
         self.row(rt, 4, "Line width", ttk.Entry(rt, textvariable=self.var("route_width"), width=6))
 
+    def _check_updates(self) -> None:
+        if not self.s.get("check_updates", True):
+            return
+
+        def bg():
+            from .update import check
+            found = check()
+            if found:
+                self.q.put(("update", found))
+        threading.Thread(target=bg, daemon=True).start()
+
+    def _show_update(self, info: dict) -> None:
+        import webbrowser
+        tag = info.get("tag", "")
+        self.update_btn.configure(text=f"{tag} ↗", command=lambda: webbrowser.open(info["url"]))
+        # packed ahead of the Recent strip: a thumbnail gives way, not this or the status
+        self.update_btn.pack(side="right", padx=(0, 14), before=self.recent_row)
+        Tooltip(self.update_btn, f"Map Poster Studio {tag} is out. Opens the download page "
+                                 "(turn this check off under Output).")
+        self._append(f"A new version is available: {tag}  {info['url']}")
+
+    def _update_px(self) -> None:
+        """'3600 × 4800 px · 17 MP' under the size, with a warning past 36 in."""
+        from .core import MAX_INCHES
+        try:
+            w, h = float(self.v["width"].get()), float(self.v["height"].get())
+            dpi = int(float(self.v["dpi"].get()))
+        except (ValueError, KeyError):
+            self.px_lbl.configure(text="enter numbers for width, height and DPI")
+            return
+        if max(w, h) > MAX_INCHES:
+            self.px_lbl.configure(text=f"⚠ over {MAX_INCHES:g} in: the long side will be "
+                                       f"cut to {MAX_INCHES:g} in")
+            return
+        if self.v["fmt"].get() != "png":
+            self.px_lbl.configure(text=f"vector file, {w:g} × {h:g} in at any size")
+            return
+        pw, ph = round(w * dpi), round(h * dpi)
+        mp = pw * ph / 1e6
+        note = "  · large: allow a minute and ~3 GB" if mp > 80 else ""
+        self.px_lbl.configure(text=f"{pw:,} × {ph:,} px · {mp:.0f} MP{note}")
+
     # ----- tab: output
     def _tab_output(self, t) -> None:
         size = self.frame(t, "Size")
@@ -741,9 +792,14 @@ class App(tk.Tk):
         sp.set("presets…")
 
         def pick_size(_e):
-            w, h = SIZE_PRESETS[sp.get()]
-            self.v["width"].set(str(w))
-            self.v["height"].set(str(h))
+            name = sp.get()
+            w, h = SIZE_PRESETS[name]
+            self.v["width"].set(f"{w:g}")
+            self.v["height"].set(f"{h:g}")
+            # screen presets are exact pixel sizes at 300 dpi, PNG
+            if any(k in name for k in ("px", "Instagram", "wallpaper", "Desktop", "Watch")):
+                self.v["dpi"].set("300")
+                self.v["fmt"].set("png")
         sp.bind("<<ComboboxSelected>>", pick_size)
         self.row(size, 0, "Preset", sp)
         wf = ttk.Frame(size)
@@ -751,7 +807,18 @@ class App(tk.Tk):
         ttk.Label(wf, text=" × ").pack(side="left")
         ttk.Entry(wf, textvariable=self.var("height"), width=6).pack(side="left")
         ttk.Label(wf, text=" in").pack(side="left")
-        self.row(size, 1, "Width × height", wf, "up to 36 in; pixel presets assume 300 DPI")
+
+        def swap():
+            w, h = self.v["width"].get(), self.v["height"].get()
+            self.v["width"].set(h)
+            self.v["height"].set(w)
+        sw = ttk.Button(wf, text="⇄", width=3, command=swap)
+        sw.pack(side="left", padx=(6, 0))
+        Tooltip(sw, "Swap portrait and landscape.")
+        self.row(size, 1, "Width × height", wf)
+        self.px_lbl = ttk.Label(size, text="", style="Muted.TLabel")
+        self.px_lbl.grid(row=2, column=1, sticky="w")
+
         self.row(size, 3, "Print bleed", ttk.Entry(size, textvariable=self.var("bleed"), width=6),
                  "inches per side; 0.125 is standard for print shops")
 
@@ -762,6 +829,14 @@ class App(tk.Tk):
         ttk.Label(ff, text="  DPI").pack(side="left")
         ttk.Entry(ff, textvariable=self.var("dpi"), width=6).pack(side="left")
         self.row(of, 0, "Format", ff, "SVG keeps layers for Inkscape / Illustrator")
+        for k in ("width", "height", "dpi", "fmt"):
+            self.v[k].trace_add("write", lambda *_: self._update_px())
+        self.after_idle(self._update_px)
+        self.row(of, 6, "Parallel renders",
+                 ttk.Combobox(of, textvariable=self.var("workers"),
+                              values=["Auto", "1", "2", "3", "4", "6", "8"],
+                              state="readonly", width=6),
+                 "themes drawn at the same time; Auto uses your cores and free memory")
         self.row(of, 2, "Wall mockup", ttk.Combobox(of, textvariable=self.var("mockup"),
                                                     values=["none", "black", "white", "oak"],
                                                     state="readonly"),
@@ -771,6 +846,10 @@ class App(tk.Tk):
                                                                 expand=True)
         ttk.Button(od, text="…", width=3, command=self._browse_outdir).pack(side="left", padx=2)
         self.row(of, 4, "Save to", od, "blank = the posters folder")
+        upd = ttk.Checkbutton(of, text="Tell me when a new version is out",
+                              variable=self.var("check_updates", tk.BooleanVar))
+        upd.grid(row=8, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        Tooltip(upd, "Checks the GitHub releases page once a day when the app starts.")
 
         pr = self.frame(t, "Print shop")
         ttk.Checkbutton(pr, text="Crop marks (use with bleed)",
@@ -1011,6 +1090,7 @@ class App(tk.Tk):
         self._run_label = label
         self._step = ""
         self._count = ""
+        self._pct = None
         self.progress.configure(mode="indeterminate", value=0)
         self.status.pack_configure(pady=(24, 8))
         self.progress.pack(side="top", fill="x")
@@ -1067,6 +1147,7 @@ class App(tk.Tk):
             display_country=s["display_country"].strip() or None,
             font_family=s["font"].strip() or None, fmt=s["fmt"], dpi=dpi,
             road_scale=road_scale, auto_roads=s["auto_roads"], classic=bool(s.get("classic")),
+            workers=0 if str(s.get("workers", "Auto")) == "Auto" else int(s["workers"]),
             show_text=s["show_text"], show_coords=s["show_coords"],
             show_gradient=s["show_gradient"], pbf=pbf,
             output_dir=s["output_dir"].strip() or None,
@@ -1599,12 +1680,16 @@ class App(tk.Tk):
         if self.worker and self.worker.is_alive():
             secs = int(time.time() - self._t0)
             step = f" · {self._step}" if self._step else ""
-            self.status.configure(text=f"{self._run_label}{step} · {secs // 60}:{secs % 60:02d}")
+            pct = getattr(self, "_pct", None)
+            pct = f" · {pct * 100:.0f}%" if pct is not None else ""
+            self.status.configure(
+                text=f"{self._run_label}{step}{pct} · {secs // 60}:{secs % 60:02d}")
             self.after(1000, self._tick)
 
     STAGES = (("Reading ", "reading map data"), ("Downloading", "downloading"),
               ("Using cached", "map data ready"), ("already in memory", "map data ready"),
-              ("Rendering", "drawing"), ("Saving", "saving"), ("Saved", "saved"))
+              ("Rendering", "drawing"), ("at a time", "drawing in parallel"),
+              ("Saving", "saving"), ("Saved", "saved"))
 
     def _append(self, text: str) -> None:
         m = re.match(r"\s*(?:=+ )?\[(\d+)/(\d+)\]", text)
@@ -1612,8 +1697,9 @@ class App(tk.Tk):
             i, n = int(m.group(1)), int(m.group(2))
             self._count = f"{i} of {n}" if n > 1 else ""
             self._step = self._count
-            self.progress.stop()
-            self.progress.configure(mode="determinate", maximum=max(n, 1), value=i - 1)
+            if getattr(self, "_pct", None) is None:
+                self.progress.stop()
+                self.progress.configure(mode="determinate", maximum=max(n, 1), value=i - 1)
         elif self.worker and self.worker.is_alive():
             for key, stage in self.STAGES:
                 if key in text:
@@ -1640,6 +1726,15 @@ class App(tk.Tk):
                 kind, val = self.q.get_nowait()
                 if kind == "log":
                     self._append(val)
+                elif kind == "update":
+                    self._show_update(val)
+                elif kind == "progress":
+                    if self.worker and self.worker.is_alive():
+                        self._pct = val
+                        if str(self.progress.cget("mode")) != "determinate":
+                            self.progress.stop()
+                            self.progress.configure(mode="determinate", maximum=1000)
+                        self.progress.configure(maximum=1000, value=int(val * 1000))
                 elif kind == "poster":
                     self.last_output = Path(val)
                     if self.last_output.suffix.lower() == ".png":

@@ -3,7 +3,7 @@
 ; posters and cache next to the exe.
 
 #ifndef MyAppVersion
-  #define MyAppVersion "1.6.0"
+  #define MyAppVersion "1.7.0"
 #endif
 #define MyAppName "Map Poster Studio"
 #define MyAppExe "MapPosterStudio.exe"

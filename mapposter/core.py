@@ -11,7 +11,8 @@ from pathlib import Path
 from . import fonts as fontmod
 from . import geocode, paths, sources, themes
 from .geometry import Marker, parse_marker, read_gpx, routes_extent
-from .log import log
+from .log import log, progress_span, step
+from . import log as logmod
 from .render import PosterOptions, render_poster
 from .units import M_PER_MI, fmt_miles, parse_distance
 from .sources import bbox_for, view_half_extents
@@ -52,6 +53,7 @@ class Job:
     pbf: str | None = None
     output_dir: str | None = None
     use_cache: bool = True
+    workers: int = 0                   # parallel theme renders: 0 = auto, 1 = off
     # layers (None = defaults from layers.json)
     layers: list[str] | None = None
     # layout
@@ -218,12 +220,10 @@ def run(job: Job, check_cancel=lambda: None, on_output=lambda p: None) -> list[P
         out_dir = paths.CACHE_DIR / "preview"
     else:
         out_dir = Path(job.output_dir) if job.output_dir else paths.POSTERS_DIR
-    outputs = []
-    for i, name in enumerate(job.themes, 1):
-        check_cancel()
-        theme = themes.load_theme(name)
-        log(f"\n[{i}/{len(job.themes)}] {theme.get('name', name)}")
-        opts = PosterOptions(
+    n = len(job.themes)
+
+    def make_opts(name):
+        return PosterOptions(
             city=job.city, country=job.country, lat=lat, lon=lon, radius_m=radius,
             width=job.width, height=job.height,
             display_city=job.display_city or None,
@@ -252,21 +252,181 @@ def run(job: Job, check_cancel=lambda: None, on_output=lambda p: None) -> list[P
             crop_marks=False if job.preview else job.crop_marks,
             check_cancel=check_cancel,
         )
-        out = output_filename(out_dir, job.city, name, opts.fmt)
+
+    def target(name, opts):
         if job.preview:
-            out = out_dir / "preview.png"
-        out = render_poster(data, theme, opts, out)
-        outputs.append(out)
-        if job.icc and not job.preview and out.suffix == ".png":
-            to_cmyk(out, job.icc)
-        if job.mockup and not job.preview and out.suffix == ".png":
-            from .extras import make_mockup
-            make_mockup(out, job.mockup)
-        on_output(out)
+            return out_dir / "preview.png"
+        return output_filename(out_dir, job.city, name, opts.fmt)
+
+    workers = 1 if job.preview else choose_workers(job.workers, n, data, job.width,
+                                                    job.height, job.dpi)
+    outputs = []
+    if workers > 1:
+        log(f"\nRendering {n} themes, {workers} at a time")
+        tasks = []
+        for name in job.themes:
+            o = make_opts(name)
+            o.check_cancel = None
+            tasks.append((name, o, target(name, o), job.icc or "", job.mockup or "",
+                          job.preview))
+        outputs = _render_parallel(data, tasks, workers, check_cancel, on_output)
+    else:
+        for i, name in enumerate(job.themes, 1):
+            check_cancel()
+            theme = themes.load_theme(name)
+            log(f"\n[{i}/{n}] {theme.get('name', name)}")
+            progress_span((i - 1) / n, 1 / n)
+            opts = make_opts(name)
+            out = render_poster(data, theme, opts, target(name, opts))
+            _after_render(out, job.icc, job.mockup, job.preview)
+            outputs.append(out)
+            on_output(out)
+    progress_span(0, 1)
+    step(1.0)
 
     log(f"\n✓ Done: {len(outputs)} {'preview' if job.preview else 'poster(s)'} "
         f"in {time.time() - t0:,.0f}s → {out_dir}")
     return outputs
+
+
+def _after_render(out: Path, icc, mockup, preview) -> None:
+    if icc and not preview and out.suffix == ".png":
+        to_cmyk(out, icc)
+    if mockup and mockup != "none" and not preview and out.suffix == ".png":
+        from .extras import make_mockup
+        make_mockup(out, mockup)
+
+
+# ----------------------------------------------------------- parallel themes
+
+def available_memory() -> float:
+    """Bytes of RAM free for new work (best guess; 4 GB if unknown)."""
+    import sys
+    try:
+        if sys.platform.startswith("win"):
+            import ctypes
+
+            class MS(ctypes.Structure):
+                _fields_ = [("len", ctypes.c_ulong), ("load", ctypes.c_ulong),
+                            ("total", ctypes.c_ulonglong), ("avail", ctypes.c_ulonglong),
+                            ("tpf", ctypes.c_ulonglong), ("apf", ctypes.c_ulonglong),
+                            ("tv", ctypes.c_ulonglong), ("av", ctypes.c_ulonglong),
+                            ("ext", ctypes.c_ulonglong)]
+            m = MS()
+            m.len = ctypes.sizeof(MS)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(m)):
+                return float(m.avail)
+        else:
+            for line in open("/proc/meminfo"):
+                if line.startswith("MemAvailable:"):
+                    return float(line.split()[1]) * 1024
+    except Exception:
+        pass
+    return 4e9
+
+
+def _data_bytes(data) -> float:
+    """Rough in-memory size of the map data."""
+    total = 0.0
+    for g in [data.roads, *data.layers.values()]:
+        if g is not None and len(g):
+            import shapely
+            total += float(shapely.get_num_coordinates(g.geometry.values).sum()) * 16 + len(g) * 200
+    return total
+
+
+def choose_workers(requested: int, n_themes: int, data, width, height, dpi) -> int:
+    """How many themes to render at the same time. Each worker holds its own copy
+    of the map data plus one image, so memory decides as much as CPU cores."""
+    import os
+    if n_themes < 2 or requested == 1:
+        return 1
+    cpus = os.cpu_count() or 1
+    per = 0.35e9 + 4.0 * _data_bytes(data) + width * height * dpi * dpi * 16
+    by_mem = int(0.75 * available_memory() / per)
+    limit = requested if requested > 1 else cpus   # the main process just waits
+    return max(1, min(limit, n_themes, by_mem, 8))
+
+
+_W_DATA = None
+
+
+def _worker_init(data_file: str) -> None:
+    import pickle
+    global _W_DATA
+    import matplotlib
+    matplotlib.use("Agg")
+    with open(data_file, "rb") as f:
+        _W_DATA = pickle.load(f)
+
+
+def _worker_render(name, opts, out, icc, mockup, preview):
+    lines: list[str] = []
+    logmod.set_sink(lines.append)
+    t0 = time.time()
+    try:
+        theme = themes.load_theme(name)
+        lines.append(f"[{theme.get('name', name)}]")
+        out = render_poster(_W_DATA, theme, opts, Path(out))
+        _after_render(out, icc, mockup, preview)
+        return str(out), lines, time.time() - t0
+    except Exception as e:  # report, don't kill the pool
+        lines.append(f"✗ {name}: {e}")
+        return None, lines, time.time() - t0
+
+
+def _render_parallel(data, tasks, workers, check_cancel, on_output) -> list[Path]:
+    import multiprocessing as mp
+    import os
+    import pickle
+    import tempfile
+    from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+    from .log import Cancelled
+
+    fd, data_file = tempfile.mkstemp(prefix="mps_data_", suffix=".pkl")
+    with os.fdopen(fd, "wb") as f:
+        pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
+    ex = ProcessPoolExecutor(workers, mp_context=mp.get_context("spawn"),
+                             initializer=_worker_init, initargs=(data_file,))
+    order = {t[0]: i for i, t in enumerate(tasks)}
+    results: dict[str, Path] = {}
+    errors = []
+    try:
+        pending = {ex.submit(_worker_render, *t): t[0] for t in tasks}
+        done_n = 0
+        step(0.02)
+        while pending:
+            done, _ = wait(list(pending), timeout=0.25, return_when=FIRST_COMPLETED)
+            for fut in done:
+                name = pending.pop(fut)
+                out, lines, secs = fut.result()
+                done_n += 1
+                for line in lines:
+                    if line.startswith("✗"):
+                        log(line)
+                if out:
+                    results[name] = Path(out)
+                    log(f"[{done_n}/{len(tasks)}] {themes.load_theme(name).get('name', name)}"
+                        f" ✓ {secs:.0f}s  Saved: {Path(out).name}")
+                    on_output(Path(out))
+                else:
+                    errors.append(name)
+                step(done_n / len(tasks))
+            check_cancel()
+    except (Cancelled, KeyboardInterrupt):
+        for proc in list(getattr(ex, "_processes", {}).values()):
+            proc.terminate()
+        ex.shutdown(wait=False, cancel_futures=True)
+        raise
+    finally:
+        ex.shutdown(wait=True, cancel_futures=True)
+        try:
+            os.remove(data_file)
+        except OSError:
+            pass
+    if errors:
+        raise RuntimeError(f"{len(errors)} theme(s) failed: {', '.join(errors)}")
+    return [results[n] for n in sorted(results, key=order.get)]
 
 
 # -------------------------------------------------------------------- batch

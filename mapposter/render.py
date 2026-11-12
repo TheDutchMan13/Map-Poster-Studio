@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 
 from .geometry import heart_path, ocean_polygons, pin_path, shape_polygon
-from .log import log
+from .log import log, step
 from .sources import MapData, view_half_extents
 
 # road class -> (theme color key, line width in points, draw order)
@@ -493,7 +493,9 @@ def render_poster(data: MapData, theme: dict, opts: PosterOptions, output: Path)
     tol = 0.0
     if opts.fmt in ("pdf", "svg"):
         tol = 0.5 * (2 * HX) / (W * 300)   # half a 300 dpi pixel, in map meters
+    step(0.05)
     prep = _prepared(data, P, None if opts.classic else (x1 - x0) * (y1 - y0), tol)
+    step(0.35)
     cancel()
     for name, (ckey, z) in POLY_LAYERS.items():
         if name in prep["polys"]:
@@ -722,6 +724,7 @@ def render_poster(data: MapData, theme: dict, opts: PosterOptions, output: Path)
         draw_crop_marks(fig, slug, b, w, h)
 
     cancel()
+    step(0.5)
     log("  Saving…")
     output.parent.mkdir(parents=True, exist_ok=True)
     kw = dict(facecolor=fig.get_facecolor(), format=opts.fmt)
@@ -732,6 +735,7 @@ def render_poster(data: MapData, theme: dict, opts: PosterOptions, output: Path)
         if icc:
             kw["pil_kwargs"] = {"icc_profile": icc, "dpi": (opts.dpi, opts.dpi)}
     fig.savefig(output, **kw)
+    step(0.97)
     fig.clear()
     if opts.fmt == "svg":
         _svg_to_layers(output)

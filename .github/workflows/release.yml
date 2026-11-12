@@ -1,0 +1,100 @@
+# Builds the exe and installer on GitHub's Windows machines and publishes the release.
+#
+#   Push a tag like v1.7.0  -> build, theme regression test, GitHub release
+#   "Run workflow" button   -> build + test only; the installer is attached to the
+#                              run as an artifact (a dry run, no release)
+#
+# push_release.ps1 pushes main and the tag for you.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Read version
+        id: ver
+        shell: pwsh
+        run: |
+          $text = Get-Content mapposter\__init__.py -Raw
+          $v = [regex]::Match($text, '__version__\s*=\s*"([^"]+)"').Groups[1].Value
+          if (-not $v) { throw "Could not read __version__" }
+          "version=$v" >> $env:GITHUB_OUTPUT
+          if ($env:GITHUB_REF_TYPE -eq "tag" -and $env:GITHUB_REF_NAME -ne "v$v") {
+            throw "Tag $env:GITHUB_REF_NAME does not match __version__ $v in mapposter\__init__.py"
+          }
+
+      - name: Install Inno Setup 7
+        # The Windows machines already have Inno Setup 6, which build_installer.bat
+        # also accepts, so a failed download here does not stop the build.
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $v = "7.1.1"
+          $tag = "is-" + ($v -replace '\.', '_')
+          Invoke-WebRequest "https://github.com/jrsoftware/issrc/releases/download/$tag/innosetup-$v-x64.exe" -OutFile is7.exe
+          Start-Process .\is7.exe -Wait -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CURRENTUSER"
+
+      - name: Build exe and installer
+        shell: cmd
+        run: build_installer.bat /quiet
+
+      - name: Theme regression test
+        shell: cmd
+        run: .venv\Scripts\python.exe tests\regress.py
+
+      - name: Upload test differences
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regression-diffs
+          path: tests/output/*_diff.png
+          if-no-files-found: ignore
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: MapPosterStudio-Setup-${{ steps.ver.outputs.version }}
+          path: dist/MapPosterStudio-Setup-${{ steps.ver.outputs.version }}.exe
+          if-no-files-found: error
+
+      - name: Publish the GitHub release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          $v = $env:VERSION
+          $installer = "dist\MapPosterStudio-Setup-$v.exe"
+          $hash = (Get-FileHash $installer -Algorithm SHA256).Hash
+          $mm = ($v -split '\.')[0..1] -join '.'
+          $readme = Get-Content README.md -Raw
+          $m = [regex]::Match($readme, '(?ms)^## What''s new in ' + [regex]::Escape($mm) + '\s*\r?\n(.*?)(?=^## |\z)')
+          $body = if ($m.Success) { $m.Groups[1].Value.Trim() } else { "Map Poster Studio $v." }
+          $notes = "## Map Poster Studio $v`n`n$body`n`nInstall: download **MapPosterStudio-Setup-$v.exe** and run it. It installs for your user only; no admin rights needed.`n`nSHA256 of the installer: ``$hash``"
+          Set-Content notes.md $notes -Encoding UTF8
+          gh release view "v$v" *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload "v$v" $installer --clobber
+          } else {
+            gh release create "v$v" $installer --title "Map Poster Studio $v" --notes-file notes.md --latest
+          }
+          if ($LASTEXITCODE -ne 0) { throw "gh release failed" }
