@@ -155,7 +155,7 @@ BUTTON_TIPS = {
 SHORTCUTS = (
     ("Ctrl+G", "Generate"), ("Ctrl+P", "Quick preview"), ("Esc", "Cancel the running job"),
     ("Ctrl+S", "Save these settings as a look"), ("Ctrl+O", "Open the posters folder"),
-    ("Ctrl+Z / Ctrl+Y", "Undo / redo a change"), ("Ctrl+1 … 6", "Jump to a section on the left rail"),
+    ("Ctrl+Z / Ctrl+Y", "Undo / redo a change"), ("Ctrl+1 … 7", "Jump to a section on the left rail"),
     ("Ctrl+D", "Dark mode on / off"), ("Ctrl+F", "Search themes"), ("F1", "This list"),
     ("Mouse wheel", "Zoom the preview"), ("Drag", "Move the zoomed preview"),
     ("Double-click", "Open the poster file"),
@@ -184,7 +184,7 @@ class App(tk.Tk):
         super().__init__()
         paths.ensure_dirs()
         self.title(f"Map Poster Studio {__version__}")
-        self.geometry("1340x820")
+        self.geometry("1440x900")
         self.minsize(1100, 680)
         try:
             ico = paths.RESOURCES.parent.parent / "assets" / "icon.ico"
@@ -286,8 +286,10 @@ class App(tk.Tk):
     @staticmethod
     def frame(parent, text):
         first = not parent.winfo_children()
-        ttk.Label(parent, text=text.upper(), style="Group.TLabel").pack(
-            anchor="w", pady=(2 if first else 18, 6))
+        if not first:
+            ttk.Separator(parent).pack(fill="x", pady=(18, 14))
+        ttk.Label(parent, text=text, style="Group.TLabel").pack(
+            anchor="w", pady=(2 if first else 0, 8))
         f = ttk.Frame(parent)
         f.pack(fill="x")
         f.columnconfigure(0, minsize=112)
@@ -296,59 +298,106 @@ class App(tk.Tk):
 
     # ------------------------------------------------------------ layout
     SECTIONS = (
-        ("place", "Place", "Where the poster is, how much it covers and where the map data comes from."),
-        ("style", "Style", "Pick one or more themes, the map layers and the road widths."),
-        ("details", "Details", "Terrain, labels, a highlighted area and map extras."),
-        ("text", "Text", "Title, fonts, frame, photo and QR code."),
-        ("overlays", "Overlays", "Your own markers and GPX routes."),
-        ("output", "Output", "Size, file type, printing and poster sets."),
+        ("place", "Place", "Choose a place",
+         "Where the poster is, how much it covers and where the map data comes from."),
+        ("style", "Style", "Choose a style",
+         "Pick one or more themes, the map layers and the road widths."),
+        ("text", "Text", "Title & text", "Title, fonts, frame, photo and QR code."),
+        ("details", "Details", "Map details", "Terrain, labels, a highlighted area and map extras."),
+        ("overlays", "Overlays", "Overlays", "Your own markers and GPX routes."),
+        ("size", "Size", "Poster size", "Paper size, pixels and print bleed."),
+        ("output", "Export", "Export", "File type, printing and poster sets."),
     )
-    INSPECTOR_W = 388
+    INSPECTOR_W = 400
+    RAIL_W = 166
 
     def _build(self) -> None:
         pal = self.pal
         self.columnconfigure(3, weight=1)
-        self.rowconfigure(0, weight=1)
+        self.rowconfigure(1, weight=1)
+        self._chrome: list = []        # hand-coloured widgets in the dark frame
+
+        def chrome(w, kind):
+            self._chrome.append((w, kind))
+            return w
+
+        def divider(parent, h=28):
+            d = chrome(tk.Frame(parent, width=1, height=h, bg=pal["c_line"]), "line")
+            return d
+
+        # ---- top bar
+        top = self.topbar = chrome(tk.Frame(self, height=62, bg=pal["rail"]), "bg")
+        top.grid(row=0, column=0, columnspan=4, sticky="ew")
+        top.pack_propagate(False)
+        self.logo = chrome(tk.Canvas(top, width=40, height=40, highlightthickness=0,
+                                     borderwidth=0, bg=pal["rail"]), "bg")
+        self.logo.pack(side="left", padx=(18, 8))
+        chrome(tk.Label(top, text="Map Poster Studio", font=studio.serif(18), bg=pal["rail"],
+                        fg=pal["c_text"]), "text").pack(side="left")
+        divider(top).pack(side="left", padx=22)
+        self.title_lbl = chrome(tk.Label(top, text="", font=studio.serif(12), bg=pal["rail"],
+                                         fg=pal["c_text"]), "text")
+        self.title_lbl.pack(side="left")
+
+        self.mode_btn = studio.ModeSwitch(top, self.dark_var, self._toggle_dark, pal)
+        self.mode_btn.pack(side="right", padx=(0, 18))
+        Tooltip(self.mode_btn, "Dark / light mode (Ctrl+D)")
+        divider(top).pack(side="right", padx=16)
+        self.redo_btn = studio.IconButton(top, "redo", self._redo, pal, size=38)
+        self.redo_btn.pack(side="right")
+        Tooltip(self.redo_btn, "Redo (Ctrl+Y)")
+        self.undo_btn = studio.IconButton(top, "undo", self._undo, pal, size=38)
+        self.undo_btn.pack(side="right", padx=(0, 6))
+        Tooltip(self.undo_btn, "Undo (Ctrl+Z)")
+        divider(top).pack(side="right", padx=16)
+        self.live_sw = studio.MiniSwitch(top, "Live", self.live_var, self._live_toggled, pal)
+        self.live_sw.pack(side="right")
+        Tooltip(self.live_sw, "Live preview: redraws a quick preview a moment after you change "
+                              "something. Works best with a local .pbf file or after the area "
+                              "is cached.")
+        # shown only when a newer release exists
+        self.update_btn = studio.PillButton(top, "", "download", None, pal, accent=True,
+                                            w=150, h=36)
+        chrome(tk.Frame(self, height=1, bg=pal["c_line"]), "line").grid(
+            row=0, column=0, columnspan=4, sticky="sew")
 
         # ---- left rail
-        rail = self.rail = tk.Frame(self, width=84, bg=pal["rail"])
-        rail.grid(row=0, column=0, sticky="ns")
+        rail = self.rail = chrome(tk.Frame(self, width=self.RAIL_W, bg=pal["rail"]), "bg")
+        rail.grid(row=1, column=0, sticky="ns")
         rail.pack_propagate(False)
-        self.logo = tk.Canvas(rail, width=40, height=40, highlightthickness=0, borderwidth=0)
-        self.logo.pack(pady=(14, 14))
+        chrome(tk.Frame(rail, width=1, bg=pal["c_line"]), "line").place(
+            relx=1.0, x=-1, rely=0, relheight=1)
+        chrome(tk.Frame(rail, height=14, bg=pal["rail"]), "bg").pack()
         self.rail_btns: list = []
-        for i, (kind, label, _sub) in enumerate(self.SECTIONS):
-            b = studio.RailButton(rail, kind, label, lambda i=i: self._show_section(i), pal)
+        for i, (kind, label, _title, _sub) in enumerate(self.SECTIONS):
+            b = studio.NavButton(rail, kind, label, lambda i=i: self._show_section(i), pal,
+                                 w=self.RAIL_W - 10)
             b.pack(pady=2)
             Tooltip(b, f"{label} (Ctrl+{i + 1})")
             self.rail_btns.append(b)
-        self.rail_spacer = tk.Frame(rail, bg=pal["rail"])
-        self.rail_spacer.pack(fill="both", expand=True)
-        self.mode_btn = studio.RailButton(rail, "moon", "", self._toggle_dark, pal, h=44)
-        self.keys_btn = studio.RailButton(rail, "keys", "", self._show_shortcuts, pal, h=44)
-        self.folder_btn = studio.RailButton(rail, "folder", "", lambda: open_path(self._out_dir()),
-                                            pal, h=44)
-        for b, tip in ((self.mode_btn, "Dark / light mode (Ctrl+D)"),
-                       (self.keys_btn, "Keyboard shortcuts (F1)"),
+        chrome(tk.Frame(rail, bg=pal["rail"]), "bg").pack(fill="both", expand=True)
+        self.keys_btn = studio.NavButton(rail, "keys", "Shortcuts", self._show_shortcuts, pal,
+                                         w=self.RAIL_W - 10, h=40)
+        self.folder_btn = studio.NavButton(rail, "folder", "Posters",
+                                           lambda: open_path(self._out_dir()), pal,
+                                           w=self.RAIL_W - 10, h=40)
+        for b, tip in ((self.keys_btn, "Keyboard shortcuts (F1)"),
                        (self.folder_btn, "Open the posters folder (Ctrl+O)")):
             b.pack(pady=1)
             Tooltip(b, tip)
-        self.rail_spacer2 = tk.Frame(rail, height=10, bg=pal["rail"])
-        self.rail_spacer2.pack()
+        chrome(tk.Frame(rail, height=12, bg=pal["rail"]), "bg").pack()
 
-        # ---- inspector
+        # ---- inspector (the cream panel)
         insp = ttk.Frame(self, width=self.INSPECTOR_W)
-        insp.grid(row=0, column=1, sticky="ns")
+        insp.grid(row=1, column=1, sticky="ns")
         insp.pack_propagate(False)
-        head = ttk.Frame(insp, padding=(20, 18, 20, 4))
+        head = ttk.Frame(insp, padding=(22, 22, 22, 6))
         head.pack(fill="x")
         self.sec_title = ttk.Label(head, text="", style="Title.TLabel")
         self.sec_title.pack(anchor="w")
-        self.sec_sub = ttk.Label(head, text="", style="Sub.TLabel", wraplength=self.INSPECTOR_W - 44,
-                                 justify="left")
-        self.sec_sub.pack(anchor="w", pady=(3, 0))
+        self.sec_tip = Tooltip(self.sec_title, "")
 
-        looks = ttk.Frame(insp, padding=(20, 10, 20, 12))
+        looks = ttk.Frame(insp, padding=(22, 10, 22, 12))
         looks.pack(fill="x", side="bottom")
         ttk.Separator(insp).pack(fill="x", side="bottom")
         ttk.Label(looks, text="Look").pack(side="left")
@@ -365,69 +414,61 @@ class App(tk.Tk):
         self.scroll.pack(fill="both", expand=True)
         self.sections = []
         for _ in self.SECTIONS:
-            f = ttk.Frame(self.scroll.inner, padding=(20, 8, 20, 22))
+            f = ttk.Frame(self.scroll.inner, padding=(22, 8, 22, 22))
             self.sections.append(f)
         self._tab_place(self.sections[0])
         self._tab_map(self.sections[1])
-        self._tab_details(self.sections[2])
-        self._tab_text(self.sections[3])
+        self._tab_text(self.sections[2])
+        self._tab_details(self.sections[3])
         self._tab_overlays(self.sections[4])
-        self._tab_output(self.sections[5])
+        self._tab_output(self.sections[5], self.sections[6])
 
-        ttk.Separator(self, orient="vertical").grid(row=0, column=2, sticky="ns")
+        ttk.Separator(self, orient="vertical").grid(row=1, column=2, sticky="ns")
 
-        # ---- main column
-        main = ttk.Frame(self)
-        main.grid(row=0, column=3, sticky="nsew")
-        tb = ttk.Frame(main, padding=(20, 12, 16, 12))
-        tb.pack(fill="x")
-        self.go_btn = ttk.Button(tb, text="Generate", style="Accent.TButton", width=11,
-                                 command=self._generate)
-        self.go_btn.pack(side="right", ipady=2)
+        # ---- bottom bar
+        bb = self.bottombar = chrome(tk.Frame(self, height=78, bg=pal["rail"]), "bg")
+        bb.grid(row=2, column=0, columnspan=4, sticky="ew")
+        bb.pack_propagate(False)
+        chrome(tk.Frame(self, height=1, bg=pal["c_line"]), "line").grid(
+            row=2, column=0, columnspan=4, sticky="new")
+        self.page_icon = chrome(tk.Canvas(bb, width=30, height=30, highlightthickness=0,
+                                          borderwidth=0, bg=pal["rail"]), "page")
+        self.page_icon.pack(side="left", padx=(22, 10))
+        self.meta_lbl = chrome(tk.Label(bb, text="", font=studio.serif(12), bg=pal["rail"],
+                                        fg=pal["c_text"]), "text")
+        self.meta_lbl.pack(side="left")
+        divider(bb, 34).pack(side="left", padx=20)
+        self.recent_row = chrome(tk.Frame(bb, height=78, bg=pal["rail"]), "bg")
+        self.go_btn = studio.PillButton(bb, "Generate poster", "download", self._generate, pal,
+                                        accent=True, w=214, h=48)
+        self.go_btn.pack(side="right", padx=(0, 18))
         self.go_tip = Tooltip(self.go_btn, "Make the posters for every selected theme (Ctrl+G).")
-        self.prev_btn = ttk.Button(tb, text="Quick preview", command=lambda: self._generate(True))
-        self.prev_btn.pack(side="right", padx=(0, 8), ipady=2)
-        live = ttk.Checkbutton(tb, text="Live", variable=self.live_var, command=self._live_toggled)
-        live.pack(side="right", padx=(0, 14))
-        Tooltip(live, "Live preview: redraws a quick preview a moment after you change something. "
-                      "Works best with a local .pbf file or after the area is cached.")
-        ttk.Separator(tb, orient="vertical").pack(side="right", fill="y", padx=(0, 14), pady=2)
-        self.redo_btn = ttk.Button(tb, text="Redo", width=6, command=self._redo)
-        self.redo_btn.pack(side="right", padx=(0, 14), ipady=2)
-        self.undo_btn = ttk.Button(tb, text="Undo", width=6, command=self._undo)
-        self.undo_btn.pack(side="right", padx=(0, 6), ipady=2)
-        tstack = ttk.Frame(tb)
-        tstack.pack(side="left", fill="x", expand=True)
-        self.title_lbl = ttk.Label(tstack, text="", style="Head.TLabel")
-        self.title_lbl.pack(side="top", anchor="w")
-        self.meta_lbl = ttk.Label(tstack, text="", style="Meta.TLabel")
-        self.meta_lbl.pack(side="top", anchor="w")
-        ttk.Separator(main).pack(fill="x")
-
-        bb = ttk.Frame(main, padding=(20, 10, 16, 10))
-        bb.pack(fill="x", side="bottom")
-        ttk.Separator(main).pack(fill="x", side="bottom")
-        ttk.Label(bb, text="Recent", style="Muted.TLabel").pack(side="left", padx=(0, 12))
-        self.recent_row = ttk.Frame(bb, height=88)   # packed last: it gives way first
-        self.log_btn = ttk.Button(bb, text="Log", width=8, command=self._toggle_log)
-        self.log_btn.pack(side="right", padx=(14, 0))
-        # shown only when a newer release exists
-        self.update_btn = ttk.Button(bb, text="", style="Accent.TButton")
-        pbx = self.pbx = ttk.Frame(bb, width=230, height=88)
-        pbx.pack(side="right", fill="y")
+        self.prev_btn = studio.PillButton(bb, "Quick preview", "eye", lambda: self._generate(True),
+                                          pal, accent=False, w=190, h=48)
+        self.prev_btn.pack(side="right", padx=(0, 12))
+        Tooltip(self.prev_btn, "A fast, low-resolution version of the first theme (Ctrl+P).")
+        self.log_btn = studio.IconButton(bb, "log", self._toggle_log, pal, size=38)
+        self.log_btn.pack(side="right", padx=(0, 14))
+        Tooltip(self.log_btn, "Show or hide the log")
+        pbx = self.pbx = chrome(tk.Frame(bb, width=230, height=78, bg=pal["rail"]), "bg")
+        pbx.pack(side="right", fill="y", padx=(0, 12))
         pbx.pack_propagate(False)
-        self.status = ttk.Label(pbx, text="Ready", anchor="e", style="Muted.TLabel")
-        self.status.pack(side="top", fill="x", pady=(30, 6))
+        self.status = chrome(tk.Label(pbx, text="Ready", anchor="e", font=studio.serif(10),
+                                      bg=pal["rail"], fg=pal["c_muted"]), "muted")
+        self.status.pack(side="top", fill="x", pady=(29, 0))
         self.progress = ttk.Progressbar(pbx, mode="indeterminate")
-        self.recent_row.pack(side="left", fill="y")
+        self.recent_row.pack(side="left", fill="y")   # packed last: it gives way first
 
+        # ---- stage
+        main = ttk.Frame(self)
+        main.grid(row=1, column=3, sticky="nsew")
         self.pane = ttk.PanedWindow(main, orient="vertical")
         self.pane.pack(fill="both", expand=True)
         stage = ttk.Frame(self.pane, style="Stage.TFrame")
         self.preview = PreviewCanvas(stage, on_open=lambda: self.last_output and open_path(self.last_output))
         self.preview.pack(fill="both", expand=True)
         self.preview.set_text("Your poster shows up here\n"
-                              "Pick a place and a theme, then press Generate. "
+                              "Pick a place and a theme, then press Generate poster. "
                               "Quick preview makes a fast, low-resolution version first.")
         self.pane.add(stage, weight=1)
 
@@ -442,6 +483,21 @@ class App(tk.Tk):
         self.log.grid(row=0, column=0, sticky="nsew")
         lsb.grid(row=0, column=1, sticky="ns")
 
+    def _use_switches(self, root) -> None:
+        """Every on/off option in the panel as a switch, like the design."""
+        if getattr(self, "_studio_loaded", "") != "sv":
+            return
+
+        def walk(w):
+            for c in w.winfo_children():
+                if c.winfo_class() == "TCheckbutton":
+                    try:
+                        c.configure(style="Switch.TCheckbutton")
+                    except tk.TclError:
+                        pass
+                walk(c)
+        walk(root)
+
     def _show_section(self, i: int) -> None:
         i = max(0, min(len(self.sections) - 1, i))
         for f in self.sections:
@@ -450,9 +506,9 @@ class App(tk.Tk):
         self.section = i
         for j, b in enumerate(self.rail_btns):
             b.set_active(j == i)
-        _kind, label, sub = self.SECTIONS[i]
-        self.sec_title.configure(text=label)
-        self.sec_sub.configure(text=sub)
+        _kind, _label, title, sub = self.SECTIONS[i]
+        self.sec_title.configure(text=title)
+        self.sec_tip.text = sub
         self.scroll.to_top()
 
     def _toggle_log(self, show: bool | None = None) -> None:
@@ -480,24 +536,32 @@ class App(tk.Tk):
         def g(k):
             return str(self.v[k].get()).strip() if k in self.v else ""
         city = g("display_city") or g("city") or "No place yet"
-        country = g("display_country") or g("country")
-        title = f"{city}, {country}" if country else city
-        self.title_lbl.configure(text=title if len(title) <= 34 else title[:33] + "…")
+        sel = self._selected_themes()
+        crumb = city if len(city) <= 28 else city[:27] + "…"
+        if sel:
+            t = self._tcache.get(sel[0]) or {}
+            name = str(t.get("name") or sel[0].replace("_", " ").title())
+            crumb += f"  ·  {name}" + (f"  +{len(sel) - 1}" if len(sel) > 1 else "")
+        else:
+            crumb += "  ·  no theme picked"
+        self.title_lbl.configure(text=crumb)
         bits = []
-        try:
-            from .units import fmt_miles
-            m = parse_distance(g("distance_mi"), bare="mi")
-            bits.append(fmt_miles(m) + (f" ({m / 1000:g} km)" if "km" in g("distance_mi") else ""))
-        except ValueError:
-            pass
         try:
             w, h = float(g("width")), float(g("height"))
             bits.append(f"{w:g} × {h:g} in")
             self.preview.set_aspect(w / h)
         except (ValueError, ZeroDivisionError):
             pass
-        n = len(self._selected_themes())
-        bits.append(f"{n} theme{'s' if n != 1 else ''}" if n else "no theme picked")
+        if g("dpi"):
+            bits.append(f"{g('dpi')} DPI")
+        if g("fmt"):
+            bits.append(g("fmt").upper())
+        try:
+            from .units import fmt_miles
+            m = parse_distance(g("distance_mi"), bare="mi")
+            bits.append(fmt_miles(m) + (f" ({m / 1000:g} km)" if "km" in g("distance_mi") else ""))
+        except ValueError:
+            pass
         if g("source") == "pbf":
             bits.append("offline")
         self.meta_lbl.configure(text="  ·  ".join(bits))
@@ -596,10 +660,24 @@ class App(tk.Tk):
 
         rd = self.frame(t, "Roads & shape")
         rf = ttk.Frame(rd)
-        ttk.Entry(rf, textvariable=self.var("road_scale"), width=6).pack(side="left")
-        ttk.Checkbutton(rf, text="auto-scale with area", variable=self.var(
-            "auto_roads", tk.BooleanVar)).pack(side="left", padx=8)
-        self.row(rd, 0, "Road width ×", rf)
+        rs = self.var("road_scale")
+        try:
+            rdv = tk.DoubleVar(value=float(rs.get()))
+        except (ValueError, tk.TclError):
+            rdv = tk.DoubleVar(value=1.0)
+        ttk.Scale(rf, from_=0.3, to=3.0, variable=rdv, command=lambda v: rs.set(
+            f"{float(v):.2f}".rstrip("0").rstrip("."))).pack(side="left", fill="x", expand=True)
+        ttk.Entry(rf, textvariable=rs, width=5).pack(side="left", padx=(8, 0))
+
+        def _sync_scale(*_):
+            try:
+                rdv.set(float(rs.get()))
+            except (ValueError, tk.TclError):
+                pass
+        rs.trace_add("write", _sync_scale)
+        self.row(rd, 0, "Road width", rf)
+        ttk.Checkbutton(rd, text="Scale roads with the area", variable=self.var(
+            "auto_roads", tk.BooleanVar)).grid(row=19, column=1, sticky="w", pady=(2, 0))
         ttk.Checkbutton(rd, text="Classic look (exactly like the original)",
                         variable=self.var("classic", tk.BooleanVar)).grid(
             row=20, column=1, sticky="w", pady=(2, 0))
@@ -757,11 +835,10 @@ class App(tk.Tk):
     def _show_update(self, info: dict) -> None:
         import webbrowser
         tag = info.get("tag", "")
-        self.update_btn.configure(text=f"{tag} ↗", command=lambda: webbrowser.open(info["url"]))
-        # packed ahead of the Recent strip: a thumbnail gives way, not this or the status
-        self.update_btn.pack(side="right", padx=(0, 14), before=self.recent_row)
+        self.update_btn.configure(text=f"{tag} is out", command=lambda: webbrowser.open(info["url"]))
+        self.update_btn.pack(side="right", padx=(0, 16), before=self.live_sw)
         Tooltip(self.update_btn, f"Map Poster Studio {tag} is out. Opens the download page "
-                                 "(turn this check off under Output).")
+                                 "(turn this check off under Export).")
         self._append(f"A new version is available: {tag}  {info['url']}")
 
     def _update_px(self) -> None:
@@ -786,8 +863,8 @@ class App(tk.Tk):
         self.px_lbl.configure(text=f"{pw:,} × {ph:,} px · {mp:.0f} MP{note}")
 
     # ----- tab: output
-    def _tab_output(self, t) -> None:
-        size = self.frame(t, "Size")
+    def _tab_output(self, ts, t) -> None:
+        size = self.frame(ts, "Paper")
         sp = ttk.Combobox(size, values=list(SIZE_PRESETS), state="readonly")
         sp.set("presets…")
 
@@ -823,6 +900,7 @@ class App(tk.Tk):
                  "inches per side; 0.125 is standard for print shops")
 
         of = self.frame(t, "File")
+        self.after_idle(self._update_title)
         ff = ttk.Frame(of)
         ttk.Combobox(ff, textvariable=self.var("fmt"), values=["png", "svg", "pdf"],
                      state="readonly", width=6).pack(side="left")
@@ -900,15 +978,13 @@ class App(tk.Tk):
     def _selected_themes(self) -> list[str]:
         return [self.theme_list.get(i) for i in self.theme_list.curselection()]
 
-    TILE_W, TILE_H = 160, 108
+    TILE_W, TILE_H = 166, 128
 
     def _rebuild_gallery(self) -> None:
         for w in self.gal_inner.winfo_children():
             w.destroy()
         self.tiles = {}
         W, H = self.TILE_W, self.TILE_H
-        MH = H - 28
-        bold = ("Segoe UI Semibold", 9) if sys.platform.startswith("win") else ("DejaVu Sans", 8, "bold")
         needle = self.theme_filter.get().strip().lower() if hasattr(self, "theme_filter") else ""
         shown = 0
         for n in range(self.theme_list.size()):
@@ -923,26 +999,39 @@ class App(tk.Tk):
             n = shown
             shown += 1
             c = tk.Canvas(self.gal_inner, width=W, height=H, highlightthickness=0,
-                          borderwidth=0, cursor="hand2", bg=t["bg"])
-            c.grid(row=n // 2, column=n % 2, padx=(0, 8) if n % 2 == 0 else 0, pady=(0, 8))
-            c.create_polygon(0, MH * .62, W * .3, MH * .55, W * .6, MH * .68, W, MH * .58,
-                             W, MH * .82, 0, MH * .84, fill=t.get("water", t["bg"]), outline="",
-                             smooth=True)
-            c.create_rectangle(W * .08, MH * .12, W * .3, MH * .32, fill=t.get("parks", t["bg"]),
-                               outline="")
+                          borderwidth=0, cursor="hand2", bg=self.pal["panel"])
+            c.grid(row=n // 2, column=n % 2, padx=(0, 10) if n % 2 == 0 else 0, pady=(0, 10))
+            studio.rounded(c, 1.5, 1.5, W - 1.5, H - 1.5, 10, fill=self.pal["card"],
+                           outline=self.pal["line"], width=1)
+            tx, ty, tw, th = 9, 9, W - 18, H - 46
+            c.create_rectangle(tx, ty, tx + tw, ty + th, fill=t["bg"], outline="")
+
+            def X(x):
+                return tx + x * tw / W
+
+            def Y(y):
+                return ty + y * th / MH
+            MH = th
+            Wd = W
+            c.create_polygon(X(0), Y(MH * .62), X(Wd * .3), Y(MH * .55), X(Wd * .6), Y(MH * .68),
+                             X(Wd), Y(MH * .58), X(Wd), Y(MH * .82), X(0), Y(MH * .84),
+                             fill=t.get("water", t["bg"]), outline="")
+            c.create_rectangle(X(Wd * .08), Y(MH * .12), X(Wd * .3), Y(MH * .32),
+                               fill=t.get("parks", t["bg"]), outline="")
             minor = t.get("road_residential", t["text"])
             for i in range(1, 7):
-                c.create_line(0, MH * i / 7, W, MH * i / 7 + 6, fill=minor, width=1)
-                c.create_line(W * i / 7, 0, W * i / 7 - 8, MH, fill=minor, width=1)
-            for pts, k, wd in (((0, MH * .3, W, MH * .55), "road_motorway", 3.2),
-                               ((W * .25, 0, W * .55, MH), "road_primary", 2.4),
-                               ((0, MH * .75, W, MH * .45), "road_secondary", 1.8),
-                               ((W * .72, 0, W * .62, MH), "road_tertiary", 1.4)):
-                c.create_line(*pts, fill=t.get(k, t["text"]), width=wd)
-            c.create_rectangle(0, MH, W, H, fill=t["bg"], outline="")
+                c.create_line(X(0), Y(MH * i / 7), X(Wd), Y(min(MH, MH * i / 7 + 5)),
+                              fill=minor, width=1)
+                c.create_line(X(Wd * i / 7), Y(0), X(Wd * i / 7 - 8), Y(MH), fill=minor, width=1)
+            for pts, k, wd in (((0, MH * .3, Wd, MH * .55), "road_motorway", 3.0),
+                               ((Wd * .25, 0, Wd * .55, MH), "road_primary", 2.2),
+                               ((0, MH * .75, Wd, MH * .45), "road_secondary", 1.7),
+                               ((Wd * .72, 0, Wd * .62, MH), "road_tertiary", 1.3)):
+                c.create_line(X(pts[0]), Y(pts[1]), X(pts[2]), Y(pts[3]),
+                              fill=t.get(k, t["text"]), width=wd)
             name = str(t.get("name") or key.replace("_", " ").title())
-            c.create_text(10, MH + 14, text=name if len(name) <= 20 else name[:19] + "…",
-                          anchor="w", fill=t["text"], font=bold)
+            c.create_text(W / 2, H - 19, text=name if len(name) <= 19 else name[:18] + "…",
+                          fill=self.pal["text"], font=studio.serif(11))
             c.bind("<Button-1>", lambda e, k=key: self._toggle_theme(k))
             c.bind("<Double-Button-1>", lambda e, k=key: self._edit_theme_key(k))
             Tooltip(c, f"{t.get('name', key)} - {t.get('description', '')}\n"
@@ -956,17 +1045,18 @@ class App(tk.Tk):
     def _mark_tiles(self) -> None:
         sel = set(self._selected_themes())
         W, H = self.TILE_W, self.TILE_H
-        acc = self.pal["accent_line"]
+        pal = self.pal
         for key, c in self.tiles.items():
             c.delete("sel")
             if key in sel:
-                c.create_rectangle(1.5, 1.5, W - 1.5, H - 1.5, outline=acc, width=3, tags="sel")
-                c.create_oval(W - 26, 7, W - 7, 26, fill=self.pal["accent"], outline="", tags="sel")
-                c.create_line(W - 21, 16.5, W - 17.5, 20, W - 11.5, 13, fill=self.pal["on_accent"],
+                studio.rounded(c, 1.5, 1.5, W - 1.5, H - 1.5, 10, outline=pal["accent"],
+                               width=2.4, tags="sel")
+                c.create_oval(W - 31, 4, W - 7, 28, fill=pal["accent"], outline="#ffffff",
+                              width=2, tags="sel")
+                c.create_line(W - 24, 16.5, W - 20.5, 20, W - 14, 12.5, fill=pal["on_accent"],
                               width=2, capstyle="round", joinstyle="round", tags="sel")
-            else:
-                c.create_rectangle(0.5, 0.5, W - 0.5, H - 0.5, outline=self.pal["line"], width=1,
-                                   tags="sel")
+        if hasattr(self, "title_lbl"):
+            self._update_title()
 
     def _toggle_theme(self, key: str) -> None:
         names = [self.theme_list.get(i) for i in range(self.theme_list.size())]
@@ -1083,6 +1173,7 @@ class App(tk.Tk):
         self.cancel_evt.clear()
         for b in (self.prev_btn, self.batch_btn):
             b.configure(state="disabled")
+        self.go_btn.icon = ""
         self.go_btn.configure(text="Cancel", style="TButton", command=self._cancel)
         self.go_tip.text = "Stop after the current step (Esc)."
         self.status.configure(text=label)
@@ -1092,7 +1183,7 @@ class App(tk.Tk):
         self._count = ""
         self._pct = None
         self.progress.configure(mode="indeterminate", value=0)
-        self.status.pack_configure(pady=(24, 8))
+        self.status.pack_configure(pady=(16, 6))
         self.progress.pack(side="top", fill="x")
         self.progress.start(12)
         self.after(1000, self._tick)
@@ -1360,54 +1451,82 @@ class App(tk.Tk):
     def _apply_theme_mode(self) -> None:
         dark = self.dark_var.get()
         pal = self.pal = studio.use_theme(self, dark)
-        self._polish_fonts()
-        field = "#232428" if dark else "#ffffff"
+        if not getattr(self, "_switched", False):
+            self._use_switches(self)
+            self._switched = True
         for w in (self.log, self.markers_txt, self.set_txt, self.theme_list, self.gpx_list):
             try:
-                w.configure(bg=field, fg=pal["text"], insertbackground=pal["text"],
-                            selectbackground="#6b4d14" if dark else "#f3dfb4",
-                            selectforeground=pal["text"], highlightthickness=1,
-                            highlightbackground=pal["line"], highlightcolor=pal["accent_line"])
+                w.configure(bg=pal["field"], fg=pal["text"], insertbackground=pal["text"],
+                            selectbackground=pal["sel"], selectforeground=pal["text"],
+                            highlightthickness=1, highlightbackground=pal["line"],
+                            highlightcolor=pal["accent"])
             except tk.TclError:
                 pass
         self.log.configure(highlightthickness=0)
-        for w in (self.rail, self.rail_spacer, self.rail_spacer2):
-            w.configure(bg=pal["rail"])
-        for b in self.rail_btns + [self.keys_btn, self.folder_btn]:
+        for w, kind in self._chrome:
+            try:
+                if kind == "line":
+                    w.configure(bg=pal["c_line"])
+                elif kind == "text":
+                    w.configure(bg=pal["rail"], fg=pal["c_text"])
+                elif kind == "muted":
+                    w.configure(bg=pal["rail"], fg=pal["c_muted"])
+                else:
+                    w.configure(bg=pal["rail"])
+            except tk.TclError:
+                pass
+        for b in self.rail_btns + [self.keys_btn, self.folder_btn, self.mode_btn, self.undo_btn,
+                                   self.redo_btn, self.live_sw, self.update_btn, self.go_btn,
+                                   self.prev_btn, self.log_btn]:
             b.set_palette(pal)
-        self.mode_btn.set_palette(pal)
-        self.mode_btn.set_kind("sun" if dark else "moon")
         self._draw_logo()
+        self.page_icon.delete("all")
+        studio.draw_icon(self.page_icon, "page", 15, 15, pal["c_text"], s=1.0)
         self.preview.set_colors(pal["stage"], pal["text"], pal["muted"], pal["placeholder"])
+        self.preview.set_bar_palette(pal["bar"], pal["bar_fg"], pal["bar_hov"], pal["bar_line"],
+                                     pal["muted"])
         self.scroll.set_bg(pal["panel"])
         studio.Placeholder.restyle(pal)
         self.swatch.configure(bg=pal["panel"])
-        self._mark_tiles()
+        if self.tiles:
+            self._rebuild_gallery()     # cards are drawn in the panel colours
+        else:
+            self._mark_tiles()
         if self._recent_items or self.recent_row.winfo_children():
             self._show_recent(self._recent_items)
+        self.after_idle(self._title_bar_colour)
+
+    def _title_bar_colour(self) -> None:
+        """Windows 11: colour the system title bar like the top bar (dark or light)."""
+        if not sys.platform.startswith("win"):
+            return
+        try:
+            import ctypes
+            hwnd = ctypes.windll.user32.GetParent(self.winfo_id())
+            dwm = ctypes.windll.dwmapi.DwmSetWindowAttribute
+
+            def setattr_(attr, val):
+                v = ctypes.c_int(val)
+                dwm(hwnd, attr, ctypes.byref(v), ctypes.sizeof(v))
+
+            def colorref(hexc):
+                r, g, b = (int(hexc[i:i + 2], 16) for i in (1, 3, 5))
+                return r | (g << 8) | (b << 16)
+            setattr_(20, 1 if self.dark_var.get() else 0)     # dark title bar (Win10 20H1+)
+            setattr_(35, colorref(self.pal["rail"]))           # caption colour (Win11)
+            setattr_(36, colorref(self.pal["c_text"]))         # caption text (Win11)
+            setattr_(34, colorref(self.pal["rail"]))           # border (Win11)
+        except Exception:
+            pass   # older Windows: keep the normal title bar
 
     def _draw_logo(self) -> None:
         c, pal = self.logo, self.pal
         c.configure(bg=pal["rail"])
         c.delete("all")
-        r, x0, y0, x1, y1 = 9, 2, 2, 38, 38
-        pts = [x0 + r, y0, x1 - r, y0, x1, y0, x1, y0 + r, x1, y1 - r, x1, y1,
-               x1 - r, y1, x0 + r, y1, x0, y1, x0, y1 - r, x0, y0 + r, x0, y0]
-        c.create_polygon(pts, smooth=True, fill=pal["accent"], outline="")
-        studio.draw_icon(c, "logo", 20, 20, pal["on_accent"])
+        studio.draw_icon(c, "logo", 20, 20, pal["accent"], s=1.35)
 
     def _polish_fonts(self) -> None:
-        """Slightly larger text and bold section titles; Windows only (Segoe UI)."""
-        if not sys.platform.startswith("win"):
-            return
-        import tkinter.font as tkfont
-        for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont"):
-            try:
-                tkfont.nametofont(name).configure(family="Segoe UI", size=10)
-            except tk.TclError:
-                pass
-        st = ttk.Style(self)
-        st.configure("TLabelframe.Label", font=("Segoe UI", 10, "bold"))
+        """Fonts are set by studio.use_theme (serif, like the design)."""
 
     # ----------------------------------------------------------- preview
     def _badge_for(self, p: Path) -> str:
@@ -1436,7 +1555,7 @@ class App(tk.Tk):
         for v in list(self.v.values()) + list(self.layer_vars.values()):
             v.trace_add("write", lambda *a: self._changed())
         for k in ("city", "country", "display_city", "display_country", "distance_mi",
-                  "width", "height", "source"):
+                  "width", "height", "source", "dpi", "fmt"):
             self.v[k].trace_add("write", lambda *a: self._update_title())
         for t in (self.markers_txt, self.set_txt):
             t.bind("<KeyRelease>", lambda e: self._changed(), add="+")
@@ -1447,6 +1566,7 @@ class App(tk.Tk):
         if self._settle_id:
             self.after_cancel(self._settle_id)
         self._settle_id = self.after(900, self._settled)
+        self.undo_btn.configure(state="normal")   # the pending change can be undone now
 
     def _snapshot(self) -> dict:
         snap = self._collect()
@@ -1473,6 +1593,7 @@ class App(tk.Tk):
             self.after_cancel(self._settle_id)
             self._settle_id = None
             self._push_snapshot()
+            self._update_undo_buttons()
 
     def _update_undo_buttons(self) -> None:
         self.undo_btn.configure(state="normal" if len(self.undo) > 1 else "disabled")
@@ -1569,7 +1690,7 @@ class App(tk.Tk):
         key("<Control-f>", self._focus_search)
         key("<F1>", self._show_shortcuts)
         key("<Escape>", lambda: self._cancel() if self.worker and self.worker.is_alive() else None)
-        for i in range(6):
+        for i in range(len(self.SECTIONS)):
             key(f"<Control-Key-{i + 1}>", lambda i=i: self._show_section(i))
 
     def _toggle_dark(self) -> None:
@@ -1630,10 +1751,10 @@ class App(tk.Tk):
                 tdir.mkdir(parents=True, exist_ok=True)
                 out = []
                 for p in files:
-                    tp = tdir / f"{p.stem}_{int(p.stat().st_mtime)}_s.png"
+                    tp = tdir / f"{p.stem}_{int(p.stat().st_mtime)}_b.png"
                     if not tp.exists():
                         with Image.open(p) as im:
-                            im.thumbnail((60, 80))
+                            im.thumbnail((42, 56))
                             im.convert("RGB").save(tp)
                     out.append((p, tp))
                 self.q.put(("recent", out))
@@ -1649,8 +1770,8 @@ class App(tk.Tk):
         self.recent_imgs = []
         pal = self.pal
         if not items:
-            ttk.Label(self.recent_row, text="Posters you make will show up here.",
-                      style="Muted.TLabel").pack(side="left", pady=30)
+            tk.Label(self.recent_row, text="Recent posters appear here", font=studio.serif(10),
+                     bg=pal["rail"], fg=pal["c_muted"]).pack(side="left", pady=29)
             return
         from PIL import ImageTk, Image
         for p, tp in items[:7]:
@@ -1661,14 +1782,14 @@ class App(tk.Tk):
                 continue
             self.recent_imgs.append(img)
             lb = tk.Label(self.recent_row, image=img, cursor="hand2", borderwidth=0,
-                          bg=pal["panel"], highlightthickness=2, highlightbackground=pal["line"],
-                          highlightcolor=pal["accent_line"], takefocus=1)
-            lb.pack(side="left", padx=(0, 8))
+                          bg=pal["rail"], highlightthickness=2, highlightbackground=pal["c_line"],
+                          highlightcolor=pal["accent"], takefocus=1)
+            lb.pack(side="left", padx=(0, 8), pady=9)
             lb.bind("<Button-1>", lambda e, q=p: self._open_recent(q))
             lb.bind("<Return>", lambda e, q=p: self._open_recent(q))
             lb.bind("<Double-Button-1>", lambda e, q=p: open_path(q))
             lb.bind("<Enter>", lambda e, w=lb: w.configure(highlightbackground=self.pal["accent_line"]))
-            lb.bind("<Leave>", lambda e, w=lb: w.configure(highlightbackground=self.pal["line"]))
+            lb.bind("<Leave>", lambda e, w=lb: w.configure(highlightbackground=self.pal["c_line"]))
             Tooltip(lb, f"{p.name}\nClick to show it here, double-click to open the file.")
 
     def _open_recent(self, p: Path) -> None:
@@ -1714,10 +1835,11 @@ class App(tk.Tk):
     def _finish(self) -> None:
         self.progress.stop()
         self.progress.pack_forget()
-        self.status.pack_configure(pady=(30, 6))
+        self.status.pack_configure(pady=(29, 0))
         for b in (self.prev_btn, self.batch_btn):
             b.configure(state="normal")
-        self.go_btn.configure(text="Generate", style="Accent.TButton", command=self._generate)
+        self.go_btn.icon = "download"
+        self.go_btn.configure(text="Generate poster", style="Accent.TButton", command=self._generate)
         self.go_tip.text = "Make the posters for every selected theme (Ctrl+G)."
 
     def _poll(self) -> None:

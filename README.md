@@ -67,11 +67,28 @@ The whole state is then read from your disk, with no rate limits. Map data is
 also cached, so every theme and every smaller poster of the same spot reuses
 it.
 
+## What's new in 1.8
+
+- A new window design, built from a mockup: a top bar with the place and theme,
+  undo/redo, a Live switch and a sun/moon switch; a wider left rail with
+  labels; a Size section split out of Output (now **Size** and **Export**);
+  theme cards with a check mark; switches for every on/off option; a road
+  width slider; and a bottom bar with the poster size, recent posters,
+  **Quick preview** and **Generate poster**.
+- Serif type throughout (Georgia on Windows).
+- Dark and light mode now change the whole window, not just the frame. Dark
+  is charcoal everywhere; light is cream everywhere. Ctrl+D or the switch
+  flips it.
+- The zoom controls on the preview are a floating vertical bar.
+- On Windows 11 the title bar takes the colour of the top bar.
+- The Undo button works as soon as you change something.
+- Posters are unchanged: every theme renders exactly as in 1.7.
+
 ## What's new in 1.7
 
 - All-themes runs draw several themes at once, one per CPU core, limited by
   free memory. In testing, 17 themes took 39 s instead of 69 s on 2 cores.
-  Change it under Output → Parallel renders, or with `--workers N`.
+  Change it under Export → Parallel renders, or with `--workers N`.
 - The first poster of a place reads at least 25 km around it from a .pbf file,
   so later posters nearby come from the cache in about 2 s instead of
   re-reading the file.
@@ -84,7 +101,7 @@ it.
   - A1, 20 × 30 and 24 × 24 presets;
   - screen presets set 300 dpi PNG.
 - A "new version available" button appears when a newer release is on
-  GitHub. It checks once a day and can be turned off under Output.
+  GitHub. It checks once a day and can be turned off under Export.
 - Online downloads log how long each part took.
 - The theme regression test (`run_tests.bat`) and automatic GitHub releases
   are described under "Build the exe".
@@ -267,14 +284,14 @@ before) or divide its number by 4.
 
 ## The window
 
-Version 1.5 has a new "Studio" layout, dark by default (Ctrl+D or the sun/moon button switches to light).
+Dark by default; Ctrl+D or the sun/moon switch changes the whole window to light.
 
-- **Left rail:** six sections (Place, Style, Details, Text, Overlays, Output). Click one or press Ctrl+1…6. At the bottom are dark/light mode, keyboard shortcuts and the posters folder.
-- **Inspector panel:** the settings for the chosen section. *Look* at the bottom saves and loads your saved looks.
-- **Toolbar:** the place and poster size at a glance, Undo / Redo (Ctrl+Z / Ctrl+Y), *Live* preview, *Quick preview* (Ctrl+P) and *Generate* (Ctrl+G). While a job runs, Generate turns into *Cancel* (Esc).
-- **Theme gallery** (Style): large swatch tiles in two columns. Click to pick, double-click to edit, type in the search box (Ctrl+F) to filter.
-- **Preview:** Fit, −, +, 100% and Open file float under the poster; mouse wheel zooms, drag moves, double-click opens the file.
-- **Bottom bar:** recent posters (click to show, double-click to open), progress and the *Log* button. The log opens by itself when something goes wrong.
+- **Top bar:** the place and theme at a glance, *Live* preview, Undo / Redo (Ctrl+Z / Ctrl+Y) and the dark/light switch.
+- **Left rail:** seven sections (Place, Style, Text, Details, Overlays, Size, Export). Click one or press Ctrl+1…7. At the bottom are the keyboard shortcuts and the posters folder.
+- **Settings panel:** the options for the chosen section. *Look* at the bottom saves and loads your saved looks.
+- **Theme gallery** (Style): cards in two columns. Click to pick, double-click to edit, type in the search box (Ctrl+F) to filter.
+- **Preview:** zoom in, zoom out, fit, 100% and open file float at the bottom right; mouse wheel zooms, drag moves, double-click opens the file.
+- **Bottom bar:** the poster size, DPI and format, recent posters (click to show, double-click to open), progress, the *Log* button, *Quick preview* (Ctrl+P) and *Generate poster* (Ctrl+G). While a job runs, Generate turns into *Cancel* (Esc). The log opens by itself when something goes wrong.
 - **Colour picker** in the theme editor with a colour square, hue bar, hex and RGB entry. The sample poster updates while you drag.
 - **Tooltips** on every option; hover for a second.
 - The window remembers its size, position and open section.
