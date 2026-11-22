@@ -23,3 +23,7 @@ layers.json
 
 # regression test scratch output
 /tests/output/
+
+# patch bundles
+*.mbox
+apply-fixes-*.bat
